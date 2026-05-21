@@ -38,7 +38,7 @@ export default {
 			}
 
 			if (interaction.type === InteractionType.APPLICATION_COMMAND) {
-				return json(await handleSlashCommand(interaction, env, ctx));
+				return json(await handleSlashCommand(interaction, env));
 			}
 
 			if (interaction.type === InteractionType.MESSAGE_COMPONENT) {
