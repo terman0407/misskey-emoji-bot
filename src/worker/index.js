@@ -13,15 +13,13 @@ import {
 
 export default {
 	async fetch(request, env, ctx) {
-		const url = new URL(request.url);
-
-		if (request.method === 'GET' && url.pathname === '/') {
+		if (request.method === 'GET') {
 			return new Response('misskey-emoji-bot (HTTP Interactions)\n', {
 				headers: { 'content-type': 'text/plain' },
 			});
 		}
 
-		if (request.method !== 'POST' || url.pathname !== '/interactions') {
+		if (request.method !== 'POST') {
 			return new Response('Not found', { status: 404 });
 		}
 
