@@ -4,6 +4,11 @@ Discord から **Misskey カスタム絵文字** を承認制で登録できる 
 `/emoji add` で画像とメタデータを送ると、承認用チャンネルにリクエストが投稿され、
 承認ロールを持つメンバーが ✅ 承認 / ❌ 却下 / ✏️ 編集 のボタンで処理できます。
 
+2 つの動作モードに対応しています:
+
+- **Gateway モード** ([src/index.js](src/index.js)) — Node.js で常時起動して Discord と WebSocket 接続
+- **HTTP Interactions モード** ([src/worker/](src/worker/)) — Cloudflare Workers にデプロイしてサーバーレス動作（推奨）
+
 ## 主な機能
 
 - `/emoji add` スラッシュコマンドで画像 + 名前 / カテゴリ / タグ / ライセンスを申請
@@ -96,25 +101,96 @@ npm run dev
 
 ```
 src/
-├── index.js          # エントリポイント / Discord クライアント
+├── index.js          # Gateway: エントリポイント
 ├── commands/
-│   └── emoji.js      # /emoji add コマンドと申請モーダル
-├── approvals.js      # 承認ボタン / 編集モーダルのハンドラ
-├── register.js       # Misskey への登録ロジック + エラー翻訳
-├── misskey.js        # Misskey API ラッパ (drive/files/create, admin/emoji/add)
-├── sanitize.js       # 絵文字名サニタイズ
-├── state.js          # TTL 付きインメモリストア
-└── sanitize.test.js  # サニタイズ関数のテスト
+│   └── emoji.js      # Gateway: /emoji add とモーダル
+├── approvals.js      # Gateway: 承認ボタン / 編集モーダル
+├── state.js          # Gateway: TTL 付きインメモリストア
+├── register.js       # Misskey 登録ロジック (両モード共通)
+├── misskey.js        # Misskey API ラッパ (両モード共通)
+├── sanitize.js       # 絵文字名サニタイズ (両モード共通)
+├── sanitize.test.js  # サニタイズ関数のテスト
+└── worker/                # Workers モード
+    ├── index.js           # Workers エントリ (fetch handler)
+    ├── verify.js          # Ed25519 署名検証
+    ├── handlers.js        # /emoji コマンド・ボタン・モーダルのハンドラ
+    ├── discord.js         # Discord API + 各種 JSON ビルダ
+    └── state.js           # Workers KV ベースの state
 scripts/
-├── register-commands.js  # スラッシュコマンド登録
-└── list-commands.js      # 登録済みコマンド確認
+├── register-commands.js   # スラッシュコマンド登録 (両モード共通)
+└── list-commands.js       # 登録済みコマンド確認
+wrangler.jsonc             # Workers の設定 (KV namespace ID は手動で埋める)
 ```
 
 ## 注意
 
-- 申請は **インメモリ** で管理しています。Bot を再起動すると保留中のリクエストは失われます。
+- Gateway モードの申請は **インメモリ** で管理しています。Bot を再起動すると保留中のリクエストは失われます。Workers モードでは KV を使うので再デプロイ後も残ります。
 - `.env` には機密情報（Discord / Misskey のトークン）が含まれます。**絶対にコミットしないでください**（`.gitignore` 設定済み）。
 - Misskey 側に同名の絵文字が既にあると `DUPLICATE_NAME` で失敗します。名前を変えて再申請してください。
+
+## Cloudflare Workers (HTTP Interactions) モード
+
+WebSocket 接続を維持せず、Discord からの POST に応答するサーバーレス構成。Workers の無料枠 (100k req/日) で十分動作します。
+
+### セットアップ
+
+```bash
+# 1. 依存をインストール (wrangler を含む)
+npm install
+
+# 2. Cloudflare にログイン
+npx wrangler login
+
+# 3. KV namespace を作成して ID を控える
+npx wrangler kv namespace create STATE
+# → output の id を wrangler.jsonc の "REPLACE_WITH_KV_NAMESPACE_ID" に貼り付け
+
+# 4. シークレットを登録 (.env でなく wrangler secret に保存)
+npx wrangler secret put DISCORD_PUBLIC_KEY
+npx wrangler secret put DISCORD_TOKEN
+npx wrangler secret put DISCORD_APPLICATION_ID
+npx wrangler secret put MISSKEY_URL
+npx wrangler secret put MISSKEY_TOKEN
+npx wrangler secret put APPROVER_ROLE_IDS
+# 任意:
+npx wrangler secret put DISCORD_APPROVAL_CHANNEL_ID
+npx wrangler secret put DEFAULT_CATEGORY
+npx wrangler secret put DEFAULT_LICENSE
+
+# 5. スラッシュコマンドを Discord に登録 (Gateway モードと共通)
+#    .env に DISCORD_TOKEN, DISCORD_CLIENT_ID, (任意) DISCORD_GUILD_ID を記載
+npm run register
+
+# 6. デプロイ
+npm run worker:deploy
+# → デプロイ URL が表示される。例: https://misskey-emoji-bot.<account>.workers.dev
+
+# 7. Discord Developer Portal で Interactions Endpoint URL を設定
+#    https://discord.com/developers/applications/<app-id>/information
+#    "Interactions Endpoint URL" に `https://<your-worker>/interactions` を設定 → Save
+#    Discord が PING を投げて検証 → ✅ なら保存成功
+```
+
+### ローカル開発
+
+```bash
+npm run worker:dev
+# ローカルで Worker が起動。テスト用の公開 URL が欲しい場合は --remote モードを使う:
+npx wrangler dev --remote
+```
+
+### ログ確認
+
+```bash
+npm run worker:tail
+```
+
+### Workers モードの違い
+
+- **state は Workers KV** にキー単位で保存（`expirationTtl` で 7 日後に自動削除）
+- 承認の重い処理 (Misskey API 呼び出し) は `ctx.waitUntil` で deferred response (type 6) の後にバックグラウンド実行
+- 署名検証は WebCrypto の Ed25519 で実装 ([src/worker/verify.js](src/worker/verify.js))
+- `discord.js` は不使用 — Embed / Modal / Button は生 JSON ([src/worker/discord.js](src/worker/discord.js))
 
 ## ライセンス
 

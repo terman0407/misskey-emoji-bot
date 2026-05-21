@@ -64,13 +64,13 @@ export async function registerEmojiFromAttachment({ attachment, meta, defaults, 
 			error: `Discord から画像をダウンロードできませんでした (HTTP ${dlRes.status})`,
 		};
 	}
-	const buffer = Buffer.from(await dlRes.arrayBuffer());
+	const data = await dlRes.arrayBuffer();
 
 	try {
 		const uploaded = await uploadDriveFile({
 			baseUrl: config.baseUrl,
 			token: config.token,
-			buffer,
+			data,
 			name: attachment.name,
 			contentType: attachment.contentType,
 		});
