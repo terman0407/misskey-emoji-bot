@@ -1,6 +1,9 @@
 node_modules/
 .env
 .env.*
+.dev.vars
+.secrets.tmp.json
+.wrangler/
 !sample.env
 *.log
 .DS_Store

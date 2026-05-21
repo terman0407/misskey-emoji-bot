@@ -36,9 +36,9 @@ async function callApi(url, options, endpoint) {
 	return res.json();
 }
 
-export async function uploadDriveFile({ baseUrl, token, buffer, name, contentType }) {
+export async function uploadDriveFile({ baseUrl, token, data, name, contentType }) {
 	const fd = new FormData();
-	fd.append('file', new Blob([buffer], { type: contentType }), name);
+	fd.append('file', new Blob([data], { type: contentType }), name);
 	fd.append('name', name);
 	fd.append('force', 'true');
 
