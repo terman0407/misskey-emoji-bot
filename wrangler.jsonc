@@ -9,10 +9,12 @@
 	"observability": {
 		"enabled": true
 	},
+	// KV namespace IDs are unique per Cloudflare account.
+	// After cloning, run `npx wrangler kv namespace create STATE` and replace the id below.
 	"kv_namespaces": [
 		{
 			"binding": "STATE",
-			"id": "3caf8b69844c4653bba0455075de4e8b"
+			"id": "REPLACE_WITH_KV_NAMESPACE_ID"
 		}
 	]
 }
