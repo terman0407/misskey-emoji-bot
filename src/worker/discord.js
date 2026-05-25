@@ -14,12 +14,14 @@ export const InteractionResponseType = {
 	DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE: 5,
 	DEFERRED_UPDATE_MESSAGE: 6,
 	UPDATE_MESSAGE: 7,
+	APPLICATION_COMMAND_AUTOCOMPLETE_RESULT: 8,
 	MODAL: 9,
 };
 
 export const ComponentType = {
 	ACTION_ROW: 1,
 	BUTTON: 2,
+	STRING_SELECT: 3,
 	TEXT_INPUT: 4,
 };
 
@@ -39,6 +41,8 @@ export const TextInputStyle = {
 export const MessageFlags = {
 	EPHEMERAL: 1 << 6,
 };
+
+export const CATEGORY_NEW_VALUE = '__NEW__';
 
 export function json(body, status = 200) {
 	return new Response(JSON.stringify(body), {
@@ -69,10 +73,6 @@ export function patchMessage(token, channelId, messageId, body) {
 
 export function postMessage(token, channelId, body) {
 	return discordRest(token, 'POST', `/channels/${channelId}/messages`, body);
-}
-
-export function getOriginalInteractionResponse(applicationId, interactionToken) {
-	return fetch(`${DISCORD_API}/webhooks/${applicationId}/${interactionToken}/messages/@original`).then(r => r.json());
 }
 
 export function buildApprovalEmbed(key, state) {
@@ -116,6 +116,15 @@ export function buildApprovalEmbed(key, state) {
 	};
 }
 
+export function buildSubmitterReceiptButtons(key) {
+	return {
+		type: ComponentType.ACTION_ROW,
+		components: [
+			{ type: ComponentType.BUTTON, custom_id: `emoji-edit:${key}`, label: '編集', emoji: { name: '✏️' }, style: ButtonStyle.SECONDARY },
+		],
+	};
+}
+
 export function buildApprovalButtons(key, status = 'pending') {
 	if (status !== 'pending') {
 		return {
@@ -139,38 +148,46 @@ export function buildApprovalButtons(key, status = 'pending') {
 	};
 }
 
-export function buildSubmitterReceiptButtons(key) {
+export function buildEditModal(approvalKey, currentMeta) {
 	return {
-		type: ComponentType.ACTION_ROW,
-		components: [
-			{ type: ComponentType.BUTTON, custom_id: `emoji-edit:${key}`, label: '編集', emoji: { name: '✏️' }, style: ButtonStyle.SECONDARY },
-		],
-	};
-}
-
-export function buildEditModal(key, state) {
-	const m = state.meta;
-	return {
-		custom_id: `emoji-edit-modal:${key}`,
+		custom_id: `emoji-edit-modal:${approvalKey}`,
 		title: 'リクエストを編集',
 		components: [
-			textInputRow('name', '絵文字名 (a-z 0-9 _)', TextInputStyle.SHORT, { required: true, max_length: 128, value: m.name ?? '' }),
-			textInputRow('category', 'カテゴリ', TextInputStyle.SHORT, { required: false, max_length: 128, value: m.category ?? '' }),
-			textInputRow('tags', 'タグ (カンマ区切り)', TextInputStyle.SHORT, { required: false, max_length: 256, value: (m.aliases ?? []).join(', ') }),
-			textInputRow('license', 'ライセンス', TextInputStyle.SHORT, { required: false, max_length: 256, value: m.license ?? '' }),
+			textInputRow('name', '絵文字名 (a-z 0-9 _)', TextInputStyle.SHORT, { required: true, max_length: 128, value: currentMeta.name ?? '' }),
+			textInputRow('tags', 'タグ (カンマ区切り)', TextInputStyle.SHORT, { required: false, max_length: 256, value: (currentMeta.aliases ?? []).join(', ') }),
+			textInputRow('license', 'ライセンス', TextInputStyle.SHORT, { required: false, max_length: 256, value: currentMeta.license ?? '' }),
 		],
 	};
 }
 
-export function buildSubmitModal(key, defaultName) {
+export function buildCategorySelectPayload(customId, categories, content) {
+	const options = [
+		{ label: '✨ 新規カテゴリを入力...', value: CATEGORY_NEW_VALUE, description: 'テキスト入力モーダルが開きます', emoji: { name: '✨' } },
+		...categories.slice(0, 24).map(c => ({ label: c.slice(0, 100), value: c.slice(0, 100) })),
+	];
 	return {
-		custom_id: `emoji-add:${key}`,
-		title: 'カスタム絵文字の登録 (申請)',
+		content: content ?? '📁 **カテゴリを選んでください**',
+		components: [{
+			type: ComponentType.ACTION_ROW,
+			components: [{
+				type: ComponentType.STRING_SELECT,
+				custom_id: customId,
+				placeholder: 'カテゴリを選択',
+				min_values: 1,
+				max_values: 1,
+				options,
+			}],
+		}],
+		flags: MessageFlags.EPHEMERAL,
+	};
+}
+
+export function buildNewCategoryModal(customId, defaultValue = '') {
+	return {
+		custom_id: customId,
+		title: '新規カテゴリ名',
 		components: [
-			textInputRow('name', '絵文字名 (a-z 0-9 _)', TextInputStyle.SHORT, { required: true, max_length: 128, value: defaultName || '', placeholder: 'kawaii_neko' }),
-			textInputRow('category', 'カテゴリ (任意)', TextInputStyle.SHORT, { required: false, max_length: 128 }),
-			textInputRow('tags', 'タグ (任意、カンマ区切り)', TextInputStyle.SHORT, { required: false, max_length: 256, placeholder: 'cat, cute, ねこ' }),
-			textInputRow('license', 'ライセンス (任意)', TextInputStyle.SHORT, { required: false, max_length: 256 }),
+			textInputRow('category', 'カテゴリ', TextInputStyle.SHORT, { required: true, max_length: 128, value: defaultValue, placeholder: '例: animal, food, kawaii' }),
 		],
 	};
 }

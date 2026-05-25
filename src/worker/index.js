@@ -6,9 +6,11 @@ import {
 } from './discord.js';
 import {
 	handleSlashCommand,
-	handleAddModalSubmit,
 	handleButton,
+	handleAutocomplete,
 	handleEditModalSubmit,
+	handleCategoryEditSelect,
+	handleNewCategoryEditModalSubmit,
 } from './handlers.js';
 
 export default {
@@ -36,10 +38,18 @@ export default {
 			}
 
 			if (interaction.type === InteractionType.APPLICATION_COMMAND) {
-				return json(await handleSlashCommand(interaction, env));
+				return json(await handleSlashCommand(interaction, env, ctx));
+			}
+
+			if (interaction.type === InteractionType.APPLICATION_COMMAND_AUTOCOMPLETE) {
+				return json(await handleAutocomplete(interaction, env));
 			}
 
 			if (interaction.type === InteractionType.MESSAGE_COMPONENT) {
+				const customId = interaction.data.custom_id;
+				if (customId.startsWith('emoji-cat-edit-select:')) {
+					return json(await handleCategoryEditSelect(interaction, env, ctx, customId.slice('emoji-cat-edit-select:'.length)));
+				}
 				return json(await handleButton(interaction, env, ctx));
 			}
 
@@ -48,8 +58,8 @@ export default {
 				if (customId.startsWith('emoji-edit-modal:')) {
 					return json(await handleEditModalSubmit(interaction, env, ctx, customId.slice('emoji-edit-modal:'.length)));
 				}
-				if (customId.startsWith('emoji-add:')) {
-					return json(await handleAddModalSubmit(interaction, env, ctx, customId.slice('emoji-add:'.length)));
+				if (customId.startsWith('emoji-cat-edit-new:')) {
+					return json(await handleNewCategoryEditModalSubmit(interaction, env, ctx, customId.slice('emoji-cat-edit-new:'.length)));
 				}
 				return json({
 					type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,

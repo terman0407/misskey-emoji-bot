@@ -49,6 +49,32 @@ export async function uploadDriveFile({ baseUrl, token, data, name, contentType 
 	}, 'drive/files/create');
 }
 
+export async function listEmojis({ baseUrl, token, limit = 100, untilId }) {
+	return callApi(`${baseUrl}/api/admin/emoji/list`, {
+		method: 'POST',
+		headers: {
+			Authorization: `Bearer ${token}`,
+			'Content-Type': 'application/json',
+		},
+		body: JSON.stringify({ limit, ...(untilId ? { untilId } : {}) }),
+	}, 'admin/emoji/list');
+}
+
+export async function fetchAllCategories({ baseUrl, token }) {
+	const categories = new Set();
+	let untilId;
+	for (let i = 0; i < 50; i++) {
+		const page = await listEmojis({ baseUrl, token, limit: 100, untilId });
+		if (!Array.isArray(page) || page.length === 0) break;
+		for (const e of page) {
+			if (e.category) categories.add(e.category);
+		}
+		if (page.length < 100) break;
+		untilId = page[page.length - 1].id;
+	}
+	return [...categories].sort((a, b) => a.localeCompare(b));
+}
+
 export async function addEmoji({ baseUrl, token, fileId, name, category, aliases, license, isSensitive, localOnly }) {
 	return callApi(`${baseUrl}/api/admin/emoji/add`, {
 		method: 'POST',
