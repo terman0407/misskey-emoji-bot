@@ -75,13 +75,18 @@ export function postMessage(token, channelId, body) {
 	return discordRest(token, 'POST', `/channels/${channelId}/messages`, body);
 }
 
+export function inlineCode(value) {
+	const s = String(value ?? '').replace(/`/g, "'").trim();
+	return '`' + (s.length ? s : '(未設定)') + '`';
+}
+
 export function buildApprovalEmbed(key, state) {
 	const m = state.meta;
 	const lines = [
-		`**Name:**     \`${m.name || '(未設定)'}\``,
-		`**Category:** ${m.category || '_(未設定)_'}`,
-		`**Tags:**     ${m.aliases?.length ? m.aliases.map(t => `\`${t}\``).join(', ') : '_(なし)_'}`,
-		`**License:**  ${m.license || '_(未設定)_'}`,
+		`**Name:**     ${inlineCode(m.name)}`,
+		`**Category:** ${inlineCode(m.category)}`,
+		`**Tags:**     ${m.aliases?.length ? m.aliases.map(t => inlineCode(t)).join(', ') : '`(なし)`'}`,
+		`**License:**  ${inlineCode(m.license)}`,
 		`**Sensitive:** ${m.isSensitive ? 'yes' : 'no'}  /  **LocalOnly:** ${m.localOnly ? 'yes' : 'no'}`,
 	];
 
@@ -95,15 +100,17 @@ export function buildApprovalEmbed(key, state) {
 		: status === 'rejected' ? '❌ 却下'
 		: '⚠️ エラー';
 
-	const fields = [];
+	const fields = [
+		{ name: '申請者', value: inlineCode(`${state.submitterTag} (${state.submitterId})`), inline: true },
+	];
 	if (status === 'approved' && state.approverTag) {
-		fields.push({ name: '承認者', value: state.approverTag, inline: true });
+		fields.push({ name: '承認者', value: inlineCode(state.approverTag), inline: true });
 	}
 	if (status === 'rejected' && state.approverTag) {
-		fields.push({ name: '却下者', value: state.approverTag, inline: true });
+		fields.push({ name: '却下者', value: inlineCode(state.approverTag), inline: true });
 	}
 	if (state.error) {
-		fields.push({ name: 'エラー', value: '```' + state.error.slice(0, 500) + '```' });
+		fields.push({ name: 'エラー', value: '```' + state.error.slice(0, 500).replace(/```/g, "'''") + '```' });
 	}
 
 	return {
@@ -111,7 +118,7 @@ export function buildApprovalEmbed(key, state) {
 		title,
 		description: lines.join('\n'),
 		image: { url: state.attachment.url },
-		footer: { text: `申請者: ${state.submitterTag} (${state.submitterId})  •  request_id: ${key}` },
+		footer: { text: `request_id: ${key}` },
 		fields,
 	};
 }
