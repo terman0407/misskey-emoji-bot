@@ -124,8 +124,8 @@ function buildEditModal(approvalKey, currentMeta) {
 		.setTitle('リクエストを編集');
 	modal.addComponents(
 		new ActionRowBuilder().addComponents(
-			new TextInputBuilder().setCustomId('name').setLabel('絵文字名 (小文字 a-z 0-9 _ のみ)').setStyle(TextInputStyle.Short)
-				.setRequired(true).setMaxLength(128).setValue(currentMeta.name ?? '').setPlaceholder('kawaii_neko (大文字不可)'),
+			new TextInputBuilder().setCustomId('name').setLabel('絵文字名 (小文字 a-z 0-9 _、大文字不可)').setStyle(TextInputStyle.Short)
+				.setRequired(true).setMaxLength(128).setValue(currentMeta.name ?? '').setPlaceholder('kawaii_neko (大文字は使用できません)'),
 		),
 		new ActionRowBuilder().addComponents(
 			new TextInputBuilder().setCustomId('tags').setLabel('タグ (カンマ区切り)').setStyle(TextInputStyle.Short)
