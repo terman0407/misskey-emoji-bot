@@ -1,4 +1,4 @@
-const EMOJI_NAME_RE = /^[a-zA-Z0-9_]+$/;
+const EMOJI_NAME_RE = /^[a-z0-9_]+$/;
 
 export function sanitizeEmojiName(input) {
 	if (!input) return '';

@@ -1,5 +1,6 @@
 import { sanitizeEmojiName, isValidEmojiName } from '../sanitize.js';
-import { registerEmojiFromAttachment, ALLOWED_TYPES } from '../register.js';
+import { ALLOWED_TYPES } from '../register.js';
+import { fetchAllCategories } from '../misskey.js';
 import * as state from './state.js';
 import {
 	InteractionResponseType,
@@ -8,14 +9,50 @@ import {
 	buildApprovalButtons,
 	buildSubmitterReceiptButtons,
 	buildEditModal,
-	buildSubmitModal,
+	buildCategorySelectPayload,
+	buildNewCategoryModal,
+	CATEGORY_NEW_VALUE,
 	patchMessage,
 	postMessage,
 	readModalField,
 	hasApproverRole,
 } from './discord.js';
 
-const SESSION_TTL = 10 * 60;
+async function patchSubmitterReceipt(env, approvalKey, current) {
+	if (!current?.submitterInteractionToken) return;
+	const body = {
+		embeds: [buildApprovalEmbed(approvalKey, current)],
+		components: current.status === 'pending' ? [buildSubmitterReceiptButtons(approvalKey)] : [],
+	};
+	try {
+		const res = await fetch(
+			`https://discord.com/api/v10/webhooks/${env.DISCORD_APPLICATION_ID}/${current.submitterInteractionToken}/messages/@original`,
+			{ method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) },
+		);
+		if (!res.ok) {
+			const text = await res.text().catch(() => '');
+			console.error(`[patch submitter receipt] ${res.status}: ${text}`);
+		}
+	} catch (e) {
+		console.error('[patch submitter receipt]', e);
+	}
+}
+
+const EDIT_SESSION_TTL = 15 * 60;
+
+function modalResponse(modal) {
+	return { type: InteractionResponseType.MODAL, data: modal };
+}
+
+function updateMessageEphemeral(content) {
+	return {
+		type: InteractionResponseType.UPDATE_MESSAGE,
+		data: { content, components: [], flags: MessageFlags.EPHEMERAL },
+	};
+}
+
+const CATEGORY_CACHE_KEY = 'cache:categories';
+const CATEGORY_CACHE_TTL = 60 * 60;
 
 function ephemeralReply(content) {
 	return {
@@ -24,17 +61,36 @@ function ephemeralReply(content) {
 	};
 }
 
-function modalResponse(modal) {
-	return { type: InteractionResponseType.MODAL, data: modal };
+function autocompleteResponse(choices) {
+	return { type: InteractionResponseType.APPLICATION_COMMAND_AUTOCOMPLETE_RESULT, data: { choices } };
 }
 
-export async function handleSlashCommand(interaction, env) {
-	if (interaction.data.name !== 'emoji') {
-		return ephemeralReply('Unknown command.');
-	}
-	const sub = interaction.data.options?.[0];
-	if (sub?.name !== 'add') return ephemeralReply('Unknown subcommand.');
+function parseRoleIds(raw) {
+	return new Set((raw ?? '').split(',').map(s => s.trim()).filter(Boolean));
+}
 
+async function getCachedCategories(env) {
+	const cached = await env.STATE.get(CATEGORY_CACHE_KEY, 'json');
+	if (cached) return cached;
+	try {
+		const fetched = await fetchAllCategories({ baseUrl: env.MISSKEY_URL, token: env.MISSKEY_TOKEN });
+		await env.STATE.put(CATEGORY_CACHE_KEY, JSON.stringify(fetched), { expirationTtl: CATEGORY_CACHE_TTL });
+		return fetched;
+	} catch (e) {
+		console.error('[fetch categories]', e);
+		return [];
+	}
+}
+
+export async function handleSlashCommand(interaction, env, ctx) {
+	if (interaction.data.name !== 'emoji') return ephemeralReply('Unknown command.');
+	const sub = interaction.data.options?.[0];
+	if (sub?.name === 'add') return handleAddCommand(interaction, env, ctx, sub);
+	if (sub?.name === 'edit') return handleEditCommand(interaction, env, ctx, sub);
+	return ephemeralReply('Unknown subcommand.');
+}
+
+async function handleAddCommand(interaction, env, ctx, sub) {
 	const opts = Object.fromEntries((sub.options ?? []).map(o => [o.name, o.value]));
 	const attachmentId = opts.image;
 	const attachment = interaction.data.resolved?.attachments?.[attachmentId];
@@ -44,104 +100,216 @@ export async function handleSlashCommand(interaction, env) {
 		return ephemeralReply(`❌ 対応していない画像タイプです: \`${attachment.content_type ?? 'unknown'}\``);
 	}
 
-	const key = state.newKey();
-	await state.put(env.STATE, `session:${key}`, {
-		attachment: {
-			name: attachment.filename,
-			url: attachment.url,
-			contentType: attachment.content_type,
-		},
-		sensitive: !!opts.sensitive,
-		localOnly: !!opts.localonly,
-	}, SESSION_TTL);
-
-	const defaultName = sanitizeEmojiName(attachment.filename);
-	return modalResponse(buildSubmitModal(key, defaultName));
-}
-
-export async function handleAddModalSubmit(interaction, env, ctx, key) {
-	const session = await state.peek(env.STATE, `session:${key}`);
-	if (!session) {
-		return ephemeralReply('⏱ セッションが期限切れです。`/emoji add` をやり直してください。');
+	let name = (opts.name || '').trim();
+	if (!name) name = sanitizeEmojiName(attachment.filename);
+	else if (!isValidEmojiName(name)) name = sanitizeEmojiName(name);
+	if (!isValidEmojiName(name)) {
+		return ephemeralReply(`❌ 絵文字名を決められませんでした (元: \`${opts.name || attachment.filename}\`)。a-z 0-9 _ のみ使用可能です。`);
 	}
-	await state.remove(env.STATE, `session:${key}`);
 
-	const name = readModalField(interaction, 'name');
-	const category = readModalField(interaction, 'category');
-	const tags = readModalField(interaction, 'tags');
-	const license = readModalField(interaction, 'license');
+	const category = (opts.category || '').trim();
+	if (!category) return ephemeralReply('❌ カテゴリは必須です。');
 
-	const meta = normalizeMeta({
+	const meta = {
 		name,
-		category: category || undefined,
-		aliases: tags ? tags.split(/[,、]/).map(s => s.trim()).filter(Boolean) : [],
-		license: license || undefined,
-		isSensitive: session.sensitive,
-		localOnly: session.localOnly,
-	}, session.attachment);
+		category,
+		aliases: opts.tags ? opts.tags.split(/[,、]/).map(s => s.trim()).filter(Boolean) : [],
+		license: opts.license || undefined,
+		isSensitive: !!opts.sensitive,
+		localOnly: !!opts.localonly,
+	};
 
 	const approvalKey = state.newKey();
 	const submitterId = interaction.member?.user?.id ?? interaction.user?.id;
 	const submitterTag = (interaction.member?.user ?? interaction.user)?.username;
 	const channelId = interaction.channel_id;
 
-	const baseState = {
+	const approvalChannelId = env.DISCORD_APPROVAL_CHANNEL_ID || null;
+	const targetChannelId = approvalChannelId || channelId;
+
+	const approvalState = {
 		submitterId,
 		submitterTag,
 		channelId,
-		attachment: session.attachment,
+		attachment: {
+			name: attachment.filename,
+			url: attachment.url,
+			contentType: attachment.content_type,
+		},
 		meta,
 		status: 'pending',
+		approvalChannelId: targetChannelId,
+		submitterInteractionToken: interaction.token,
 	};
+	await state.put(env.STATE, approvalKey, approvalState);
 
-	const approvalChannelId = env.DISCORD_APPROVAL_CHANNEL_ID || null;
-
-	if (approvalChannelId) {
-		await state.put(env.STATE, approvalKey, { ...baseState, approvalChannelId });
-		ctx.waitUntil((async () => {
-			try {
-				const posted = await postMessage(env.DISCORD_TOKEN, approvalChannelId, {
-					content: `📥 <@${submitterId}> から絵文字登録の申請があります`,
-					embeds: [buildApprovalEmbed(approvalKey, { ...baseState, approvalChannelId })],
-					components: [buildApprovalButtons(approvalKey, 'pending')],
-					allowed_mentions: { users: [] },
-				});
-				await state.update(env.STATE, approvalKey, s => ({ ...s, approvalMessageId: posted.id }));
-			} catch (e) {
-				console.error('[post approval-message]', e);
-			}
-		})());
-		return {
-			type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-			data: {
-				content: '📥 申請を受け付けました。承認をお待ちください。',
-				components: [buildSubmitterReceiptButtons(approvalKey)],
-				flags: MessageFlags.EPHEMERAL,
-			},
-		};
-	}
-
-	// Inline mode: approval message lives in the same channel as the request.
-	await state.put(env.STATE, approvalKey, { ...baseState, approvalChannelId: channelId });
 	ctx.waitUntil((async () => {
 		try {
-			const original = await fetch(
-				`https://discord.com/api/v10/webhooks/${env.DISCORD_APPLICATION_ID}/${interaction.token}/messages/@original`,
-			).then(r => r.json());
-			if (original?.id) {
-				await state.update(env.STATE, approvalKey, s => ({ ...s, approvalMessageId: original.id }));
+			const payload = {
+				embeds: [buildApprovalEmbed(approvalKey, approvalState)],
+				components: [buildApprovalButtons(approvalKey, 'pending')],
+			};
+			if (approvalChannelId) {
+				payload.content = `📥 <@${submitterId}> から絵文字登録の申請があります`;
+				payload.allowed_mentions = { users: [] };
 			}
+			const posted = await postMessage(env.DISCORD_TOKEN, targetChannelId, payload);
+			await state.update(env.STATE, approvalKey, s => ({ ...s, approvalMessageId: posted.id }));
 		} catch (e) {
-			console.error('[fetch original]', e);
+			console.error('[post approval-message]', e);
 		}
 	})());
+
 	return {
 		type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
 		data: {
-			embeds: [buildApprovalEmbed(approvalKey, { ...baseState, approvalChannelId: channelId })],
-			components: [buildApprovalButtons(approvalKey, 'pending')],
+			content: `📥 申請を受け付けました (request_id: \`${approvalKey}\`)。承認をお待ちください。`,
+			embeds: [buildApprovalEmbed(approvalKey, approvalState)],
+			components: [{
+				type: 1,
+				components: [
+					{ type: 2, custom_id: `emoji-edit:${approvalKey}`, label: '編集', emoji: { name: '✏️' }, style: 2 },
+				],
+			}],
+			flags: MessageFlags.EPHEMERAL,
 		},
 	};
+}
+
+async function handleEditCommand(interaction, env, ctx, sub) {
+	const opts = Object.fromEntries((sub.options ?? []).map(o => [o.name, o.value]));
+	const approvalKey = opts.request_id;
+	if (!approvalKey) return ephemeralReply('❌ request_id が必要です。');
+
+	const current = await state.peek(env.STATE, approvalKey);
+	if (!current) return ephemeralReply('⏱ そのリクエストは存在しないか期限切れです。');
+	if (current.status !== 'pending') {
+		return ephemeralReply(`このリクエストは既に \`${current.status}\` です。`);
+	}
+
+	const approverRoleIds = parseRoleIds(env.APPROVER_ROLE_IDS);
+	const userId = interaction.member?.user?.id ?? interaction.user?.id;
+	const isSubmitter = userId === current.submitterId;
+	const isApprover = hasApproverRole(interaction.member, approverRoleIds);
+	if (!isSubmitter && !isApprover) {
+		return ephemeralReply('🔒 編集権限がありません (申請者または承認者のみ)');
+	}
+
+	const newMeta = { ...current.meta };
+	if (opts.name !== undefined) {
+		let n = String(opts.name).trim();
+		if (!isValidEmojiName(n)) n = sanitizeEmojiName(n);
+		if (!isValidEmojiName(n)) return ephemeralReply('❌ 絵文字名が不正です。');
+		newMeta.name = n;
+	}
+	if (opts.category !== undefined) newMeta.category = String(opts.category).trim();
+	if (opts.tags !== undefined) {
+		newMeta.aliases = opts.tags ? String(opts.tags).split(/[,、]/).map(s => s.trim()).filter(Boolean) : [];
+	}
+	if (opts.license !== undefined) newMeta.license = opts.license || undefined;
+	if (opts.sensitive !== undefined) newMeta.isSensitive = !!opts.sensitive;
+	if (opts.localonly !== undefined) newMeta.localOnly = !!opts.localonly;
+
+	const updated = await state.update(env.STATE, approvalKey, s => ({ ...s, meta: newMeta, error: undefined }));
+
+	if (updated?.approvalChannelId && updated?.approvalMessageId) {
+		ctx.waitUntil((async () => {
+			try {
+				await patchMessage(env.DISCORD_TOKEN, updated.approvalChannelId, updated.approvalMessageId, {
+					embeds: [buildApprovalEmbed(approvalKey, updated)],
+					components: [buildApprovalButtons(approvalKey, 'pending')],
+				});
+			} catch (e) {
+				console.error('[patch after edit]', e);
+			}
+		})());
+	}
+	ctx.waitUntil(patchSubmitterReceipt(env, approvalKey, updated));
+
+	return ephemeralReply(`✏️ 編集を保存しました (request_id: \`${approvalKey}\`)`);
+}
+
+export async function handleAutocomplete(interaction, env) {
+	const focused = findFocusedOption(interaction.data.options);
+	if (!focused) return autocompleteResponse([]);
+
+	if (focused.name === 'category') {
+		return autocompleteCategory(focused, env);
+	}
+	if (focused.name === 'request_id') {
+		return autocompleteRequestId(focused, env, interaction);
+	}
+	return autocompleteResponse([]);
+}
+
+async function autocompleteCategory(focused, env) {
+	const query = (focused.value ?? '').trim();
+	const lower = query.toLowerCase();
+	const categories = await getCachedCategories(env);
+
+	let matches = lower
+		? categories.filter(c => c.toLowerCase().includes(lower))
+		: categories.slice();
+	matches = matches.slice(0, 25);
+
+	if (query && !categories.some(c => c.toLowerCase() === lower)) {
+		if (matches.length === 25) matches.pop();
+		matches.unshift(`✨ 新規: ${query.slice(0, 80)}`);
+	}
+
+	const choices = matches.map(m => {
+		const isNew = m.startsWith('✨ 新規: ');
+		const value = isNew ? m.slice('✨ 新規: '.length) : m;
+		return { name: m.slice(0, 100), value: value.slice(0, 100) };
+	});
+	return autocompleteResponse(choices);
+}
+
+async function autocompleteRequestId(focused, env, interaction) {
+	const query = (focused.value ?? '').trim().toLowerCase();
+	const userId = interaction.member?.user?.id ?? interaction.user?.id;
+	const approverRoleIds = parseRoleIds(env.APPROVER_ROLE_IDS);
+	const isApprover = hasApproverRole(interaction.member, approverRoleIds);
+
+	const pending = await listPendingApprovals(env, userId, isApprover);
+	const matches = pending
+		.filter(p => !query
+			|| p.key.toLowerCase().includes(query)
+			|| (p.meta?.name ?? '').toLowerCase().includes(query)
+			|| (p.meta?.category ?? '').toLowerCase().includes(query))
+		.slice(0, 25);
+
+	const choices = matches.map(p => ({
+		name: `${p.meta?.name ?? '???'} (${p.meta?.category ?? '-'}) — ${p.key}`.slice(0, 100),
+		value: p.key,
+	}));
+	return autocompleteResponse(choices);
+}
+
+async function listPendingApprovals(env, userId, isApprover) {
+	const list = await env.STATE.list();
+	const pending = [];
+	for (const k of list.keys) {
+		const name = k.name;
+		if (name.startsWith('session:') || name.startsWith('cache:') || name.startsWith('edit-session:')) continue;
+		const data = await env.STATE.get(name, 'json');
+		if (!data || data.status !== 'pending') continue;
+		if (!isApprover && data.submitterId !== userId) continue;
+		pending.push({ key: name, ...data });
+	}
+	return pending;
+}
+
+function findFocusedOption(options) {
+	if (!options) return null;
+	for (const o of options) {
+		if (o.focused) return o;
+		if (o.options) {
+			const nested = findFocusedOption(o.options);
+			if (nested) return nested;
+		}
+	}
+	return null;
 }
 
 export async function handleButton(interaction, env, ctx) {
@@ -170,12 +338,10 @@ export async function handleButton(interaction, env, ctx) {
 		if (!isSubmitter && !isApprover) {
 			return ephemeralReply('🔒 編集権限がありません (申請者または承認者のみ)');
 		}
-		return modalResponse(buildEditModal(key, current));
+		return modalResponse(buildEditModal(key, current.meta));
 	}
 
-	if (!isApprover) {
-		return ephemeralReply('🔒 承認権限がありません。');
-	}
+	if (!isApprover) return ephemeralReply('🔒 承認権限がありません。');
 
 	const approverTag = (interaction.member?.user ?? interaction.user)?.username;
 
@@ -184,6 +350,7 @@ export async function handleButton(interaction, env, ctx) {
 			...s, status: 'rejected', approverTag, approverId: userId,
 		}));
 		ctx.waitUntil(notifySubmitter(env, updated, 'rejected', approverTag, null));
+		ctx.waitUntil(patchSubmitterReceipt(env, key, updated));
 		return {
 			type: InteractionResponseType.UPDATE_MESSAGE,
 			data: {
@@ -199,6 +366,7 @@ export async function handleButton(interaction, env, ctx) {
 }
 
 async function handleApproveBackground(env, interaction, key, current, approverTag, approverId) {
+	const { registerEmojiFromAttachment } = await import('../register.js');
 	const result = await registerEmojiFromAttachment({
 		attachment: current.attachment,
 		meta: current.meta,
@@ -230,6 +398,7 @@ async function handleApproveBackground(env, interaction, key, current, approverT
 			console.error('[patch approved message]', e);
 		}
 		console.log(`[approved] ${current.attachment.name} -> :${result.name}: (id=${result.id}) by ${approverTag}`);
+		await patchSubmitterReceipt(env, key, updated);
 		await notifySubmitter(env, updated, 'approved', approverTag, result.name);
 		await state.remove(env.STATE, key);
 	} else {
@@ -242,66 +411,9 @@ async function handleApproveBackground(env, interaction, key, current, approverT
 		} catch (e) {
 			console.error('[patch failed message]', e);
 		}
+		await patchSubmitterReceipt(env, key, updated);
 		console.log(`[approve-failed] ${current.attachment.name} by ${approverTag}: ${result.error}`);
 	}
-}
-
-export async function handleEditModalSubmit(interaction, env, ctx, key) {
-	const current = await state.peek(env.STATE, key);
-	if (!current) {
-		return ephemeralReply('⏱ このリクエストは期限切れ or 処理済みです。');
-	}
-
-	const approverRoleIds = parseRoleIds(env.APPROVER_ROLE_IDS);
-	const userId = interaction.member?.user?.id ?? interaction.user?.id;
-	const isSubmitter = userId === current.submitterId;
-	const isApprover = hasApproverRole(interaction.member, approverRoleIds);
-	if (!isSubmitter && !isApprover) {
-		return ephemeralReply('🔒 編集権限がありません (申請者または承認者のみ)');
-	}
-
-	const name = readModalField(interaction, 'name');
-	const category = readModalField(interaction, 'category');
-	const tags = readModalField(interaction, 'tags');
-	const license = readModalField(interaction, 'license');
-
-	const updated = await state.update(env.STATE, key, s => ({
-		...s,
-		meta: {
-			...s.meta,
-			name,
-			category: category || undefined,
-			aliases: tags ? tags.split(/[,、]/).map(t => t.trim()).filter(Boolean) : [],
-			license: license || undefined,
-		},
-		error: undefined,
-	}));
-
-	const fromApprovalMessage = interaction.message?.id && interaction.message.id === current.approvalMessageId;
-
-	if (fromApprovalMessage) {
-		return {
-			type: InteractionResponseType.UPDATE_MESSAGE,
-			data: {
-				embeds: [buildApprovalEmbed(key, updated)],
-				components: [buildApprovalButtons(key, 'pending')],
-			},
-		};
-	}
-
-	if (updated.approvalChannelId && updated.approvalMessageId) {
-		ctx.waitUntil((async () => {
-			try {
-				await patchMessage(env.DISCORD_TOKEN, updated.approvalChannelId, updated.approvalMessageId, {
-					embeds: [buildApprovalEmbed(key, updated)],
-					components: [buildApprovalButtons(key, 'pending')],
-				});
-			} catch (e) {
-				console.error('[patch approval-message after edit]', e);
-			}
-		})());
-	}
-	return ephemeralReply('✏️ 編集を保存しました');
 }
 
 async function notifySubmitter(env, current, status, approverTag, registeredName) {
@@ -332,21 +444,97 @@ function splitCustomId(customId) {
 	return i < 0 ? [customId, ''] : [customId.slice(0, i), customId.slice(i + 1)];
 }
 
-function parseRoleIds(raw) {
-	return new Set((raw ?? '').split(',').map(s => s.trim()).filter(Boolean));
+export async function handleEditModalSubmit(interaction, env, ctx, approvalKey) {
+	const current = await state.peek(env.STATE, approvalKey);
+	if (!current) {
+		return ephemeralReply('⏱ このリクエストは期限切れ or 処理済みです。');
+	}
+	if (current.status !== 'pending') {
+		return ephemeralReply(`このリクエストは既に \`${current.status}\` です。`);
+	}
+
+	const userId = interaction.member?.user?.id ?? interaction.user?.id;
+	const isSubmitter = userId === current.submitterId;
+	const isApprover = hasApproverRole(interaction.member, parseRoleIds(env.APPROVER_ROLE_IDS));
+	if (!isSubmitter && !isApprover) {
+		return ephemeralReply('🔒 編集権限がありません');
+	}
+
+	const name = readModalField(interaction, 'name');
+	const tags = readModalField(interaction, 'tags');
+	const license = readModalField(interaction, 'license');
+
+	await state.put(env.STATE, `edit-session:${approvalKey}`, {
+		name, tags, license, editorId: userId,
+	}, EDIT_SESSION_TTL);
+
+	const categories = await getCachedCategories(env);
+	const content = `📁 **新しいカテゴリを選んでください** (現在: \`${current.meta?.category || '未設定'}\`)`;
+	return {
+		type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+		data: buildCategorySelectPayload(`emoji-cat-edit-select:${approvalKey}`, categories, content),
+	};
 }
 
-function normalizeMeta(meta, attachment) {
-	let name = meta.name;
-	if (!isValidEmojiName(name)) {
-		name = sanitizeEmojiName(name ?? attachment.name);
+export async function handleCategoryEditSelect(interaction, env, ctx, approvalKey) {
+	const editSession = await state.peek(env.STATE, `edit-session:${approvalKey}`);
+	if (!editSession) {
+		return updateMessageEphemeral('⏱ 編集セッションが期限切れです。もう一度 ✏️ ボタンから始めてください。');
 	}
-	return {
-		name,
-		category: meta.category,
-		aliases: meta.aliases ?? [],
-		license: meta.license,
-		isSensitive: meta.isSensitive ?? false,
-		localOnly: meta.localOnly ?? false,
-	};
+	const selectedValue = interaction.data.values?.[0];
+	if (!selectedValue) return ephemeralReply('カテゴリを選択してください。');
+
+	if (selectedValue === CATEGORY_NEW_VALUE) {
+		return modalResponse(buildNewCategoryModal(`emoji-cat-edit-new:${approvalKey}`));
+	}
+	return finalizeEdit(env, ctx, approvalKey, editSession, selectedValue);
+}
+
+export async function handleNewCategoryEditModalSubmit(interaction, env, ctx, approvalKey) {
+	const editSession = await state.peek(env.STATE, `edit-session:${approvalKey}`);
+	if (!editSession) {
+		return ephemeralReply('⏱ 編集セッションが期限切れです。もう一度 ✏️ ボタンから始めてください。');
+	}
+	const category = readModalField(interaction, 'category');
+	if (!category) return ephemeralReply('カテゴリを入力してください。');
+	return finalizeEdit(env, ctx, approvalKey, editSession, category);
+}
+
+async function finalizeEdit(env, ctx, approvalKey, editSession, category) {
+	const current = await state.peek(env.STATE, approvalKey);
+	if (!current || current.status !== 'pending') {
+		await state.remove(env.STATE, `edit-session:${approvalKey}`);
+		return updateMessageEphemeral('⏱ このリクエストは期限切れ or 処理済みです。');
+	}
+
+	let name = editSession.name?.trim() || current.meta.name;
+	if (!isValidEmojiName(name)) name = sanitizeEmojiName(name);
+	const aliases = editSession.tags
+		? editSession.tags.split(/[,、]/).map(t => t.trim()).filter(Boolean)
+		: [];
+	const license = editSession.license?.trim() || undefined;
+
+	const updated = await state.update(env.STATE, approvalKey, s => ({
+		...s,
+		meta: { ...s.meta, name, category, aliases, license },
+		error: undefined,
+	}));
+
+	await state.remove(env.STATE, `edit-session:${approvalKey}`);
+
+	if (updated?.approvalChannelId && updated?.approvalMessageId) {
+		ctx.waitUntil((async () => {
+			try {
+				await patchMessage(env.DISCORD_TOKEN, updated.approvalChannelId, updated.approvalMessageId, {
+					embeds: [buildApprovalEmbed(approvalKey, updated)],
+					components: [buildApprovalButtons(approvalKey, 'pending')],
+				});
+			} catch (e) {
+				console.error('[patch after button edit]', e);
+			}
+		})());
+	}
+	ctx.waitUntil(patchSubmitterReceipt(env, approvalKey, updated));
+
+	return updateMessageEphemeral(`✏️ 編集を保存しました (カテゴリ: \`${category}\`)`);
 }

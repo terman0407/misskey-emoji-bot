@@ -42,3 +42,16 @@ export function take(key) {
 export function newKey() {
 	return crypto.randomUUID().replace(/-/g, '').slice(0, 16);
 }
+
+export function listPendingApprovals(submitterId, isApprover) {
+	gc();
+	const results = [];
+	for (const [k, v] of store) {
+		if (k.startsWith('edit-session:')) continue;
+		const value = v.value;
+		if (!value || value.status !== 'pending') continue;
+		if (!isApprover && value.submitterId !== submitterId) continue;
+		results.push({ key: k, ...value });
+	}
+	return results;
+}

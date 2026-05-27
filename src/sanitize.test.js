@@ -22,7 +22,9 @@ const validity = [
 	['hello', true],
 	['', false],
 	['hello world', false],
-	['CamelCase', true],
+	['CamelCase', false],
+	['UPPER', false],
+	['lower_case_123', true],
 	['123', true],
 	['-bad', false],
 ];
