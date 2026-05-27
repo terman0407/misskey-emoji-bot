@@ -66,13 +66,18 @@ function hasApproverRole(member) {
 	return false;
 }
 
+function inlineCode(value) {
+	const s = String(value ?? '').replace(/`/g, "'").trim();
+	return '`' + (s.length ? s : '(未設定)') + '`';
+}
+
 function buildApprovalEmbed(key, state) {
 	const m = state.meta;
 	const lines = [
-		`**Name:**     \`${m.name || '(未設定)'}\``,
-		`**Category:** ${m.category || '_(未設定)_'}`,
-		`**Tags:**     ${m.aliases?.length ? m.aliases.map(t => `\`${t}\``).join(', ') : '_(なし)_'}`,
-		`**License:**  ${m.license || '_(未設定)_'}`,
+		`**Name:**     ${inlineCode(m.name)}`,
+		`**Category:** ${inlineCode(m.category)}`,
+		`**Tags:**     ${m.aliases?.length ? m.aliases.map(t => inlineCode(t)).join(', ') : '`(なし)`'}`,
+		`**License:**  ${inlineCode(m.license)}`,
 		`**Sensitive:** ${m.isSensitive ? 'yes' : 'no'}  /  **LocalOnly:** ${m.localOnly ? 'yes' : 'no'}`,
 	];
 
@@ -91,11 +96,12 @@ function buildApprovalEmbed(key, state) {
 		.setTitle(title)
 		.setDescription(lines.join('\n'))
 		.setImage(state.attachment.url)
-		.setFooter({ text: `申請者: ${state.submitterTag} (${state.submitterId})  •  request_id: ${key}` });
+		.setFooter({ text: `request_id: ${key}` })
+		.addFields({ name: '申請者', value: inlineCode(`${state.submitterTag} (${state.submitterId})`), inline: true });
 
-	if (status === 'approved' && state.approverTag) embed.addFields({ name: '承認者', value: state.approverTag, inline: true });
-	if (status === 'rejected' && state.approverTag) embed.addFields({ name: '却下者', value: state.approverTag, inline: true });
-	if (state.error) embed.addFields({ name: 'エラー', value: '```' + state.error.slice(0, 500) + '```' });
+	if (status === 'approved' && state.approverTag) embed.addFields({ name: '承認者', value: inlineCode(state.approverTag), inline: false });
+	if (status === 'rejected' && state.approverTag) embed.addFields({ name: '却下者', value: inlineCode(state.approverTag), inline: false });
+	if (state.error) embed.addFields({ name: 'エラー', value: '```' + state.error.slice(0, 500).replace(/```/g, "'''") + '```' });
 	return embed;
 }
 
