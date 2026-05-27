@@ -99,8 +99,8 @@ function buildApprovalEmbed(key, state) {
 		.setFooter({ text: `request_id: ${key}` })
 		.addFields({ name: '申請者', value: inlineCode(`${state.submitterTag} (${state.submitterId})`), inline: true });
 
-	if (status === 'approved' && state.approverTag) embed.addFields({ name: '承認者', value: inlineCode(state.approverTag), inline: true });
-	if (status === 'rejected' && state.approverTag) embed.addFields({ name: '却下者', value: inlineCode(state.approverTag), inline: true });
+	if (status === 'approved' && state.approverTag) embed.addFields({ name: '承認者', value: inlineCode(state.approverTag), inline: false });
+	if (status === 'rejected' && state.approverTag) embed.addFields({ name: '却下者', value: inlineCode(state.approverTag), inline: false });
 	if (state.error) embed.addFields({ name: 'エラー', value: '```' + state.error.slice(0, 500).replace(/```/g, "'''") + '```' });
 	return embed;
 }

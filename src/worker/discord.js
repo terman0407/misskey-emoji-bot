@@ -104,10 +104,10 @@ export function buildApprovalEmbed(key, state) {
 		{ name: '申請者', value: inlineCode(`${state.submitterTag} (${state.submitterId})`), inline: true },
 	];
 	if (status === 'approved' && state.approverTag) {
-		fields.push({ name: '承認者', value: inlineCode(state.approverTag), inline: true });
+		fields.push({ name: '承認者', value: inlineCode(state.approverTag), inline: false });
 	}
 	if (status === 'rejected' && state.approverTag) {
-		fields.push({ name: '却下者', value: inlineCode(state.approverTag), inline: true });
+		fields.push({ name: '却下者', value: inlineCode(state.approverTag), inline: false });
 	}
 	if (state.error) {
 		fields.push({ name: 'エラー', value: '```' + state.error.slice(0, 500).replace(/```/g, "'''") + '```' });
