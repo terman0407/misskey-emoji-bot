@@ -153,7 +153,7 @@ export function buildEditModal(approvalKey, currentMeta) {
 		custom_id: `emoji-edit-modal:${approvalKey}`,
 		title: 'リクエストを編集',
 		components: [
-			textInputRow('name', '絵文字名 (a-z 0-9 _)', TextInputStyle.SHORT, { required: true, max_length: 128, value: currentMeta.name ?? '' }),
+			textInputRow('name', '絵文字名 (小文字 a-z 0-9 _ のみ)', TextInputStyle.SHORT, { required: true, max_length: 128, value: currentMeta.name ?? '', placeholder: 'kawaii_neko (大文字不可)' }),
 			textInputRow('tags', 'タグ (カンマ区切り)', TextInputStyle.SHORT, { required: false, max_length: 256, value: (currentMeta.aliases ?? []).join(', ') }),
 			textInputRow('license', 'ライセンス', TextInputStyle.SHORT, { required: false, max_length: 256, value: currentMeta.license ?? '' }),
 		],

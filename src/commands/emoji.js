@@ -49,7 +49,7 @@ export const data = new SlashCommandBuilder()
 			.setAutocomplete(true))
 		.addStringOption(o => o
 			.setName('name')
-			.setDescription('絵文字名 (a-z 0-9 _)')
+			.setDescription('絵文字名 (小文字 a-z 0-9 _ のみ。大文字不可)')
 			.setRequired(false)
 			.setMaxLength(128))
 		.addStringOption(o => o
