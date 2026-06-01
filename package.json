@@ -4,17 +4,16 @@
   "private": true,
   "license": "MIT",
   "type": "module",
-  "main": "src/index.js",
+  "main": "src/worker/index.js",
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "node --watch src/index.js",
     "register": "node scripts/register-commands.js",
-    "worker:dev": "wrangler dev",
-    "worker:deploy": "wrangler deploy",
-    "worker:tail": "wrangler tail"
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "test": "node src/sanitize.test.js"
   },
   "engines": {
-    "node": ">=24.0.0"
+    "node": ">=20.0.0"
   },
   "dependencies": {
     "discord.js": "^14.16.3",
