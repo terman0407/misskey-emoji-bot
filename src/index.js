@@ -292,26 +292,6 @@ async function handleAddCommand(interaction) {
 		console.error('[post approval-message]', e);
 	}
 
-	// Public, read-only notification in the submission channel — only when the
-	// approval channel is different (otherwise the approval message above is
-	// already public in this channel).
-	if (approvalChannelId && approvalChannelId !== interaction.channelId) {
-		try {
-			const noteChannel = await client.channels.fetch(interaction.channelId);
-			const note = await noteChannel.send({
-				embeds: [buildApprovalEmbed(approvalKey, approvalState)],
-				allowedMentions: { parse: [] },
-			});
-			update(approvalKey, s => ({
-				...s,
-				notificationChannelId: interaction.channelId,
-				notificationMessageId: note.id,
-			}), APPROVAL_TTL_MS);
-		} catch (e) {
-			console.error('[post public notification]', e);
-		}
-	}
-
 	await interaction.editReply({
 		content: `📥 申請を受け付けました (request_id: \`${approvalKey}\`)。承認をお待ちください。`,
 		embeds: [buildApprovalEmbed(approvalKey, approvalState)],
@@ -364,7 +344,6 @@ async function handleEditCommand(interaction) {
 	const updated = update(approvalKey, s => ({ ...s, meta: newMeta, error: undefined }), APPROVAL_TTL_MS);
 	await patchApprovalMessage(updated, approvalKey);
 	await patchSubmitterReceipt(updated, approvalKey);
-	await patchPublicNotification(updated, approvalKey);
 	await interaction.reply({ content: `✏️ 編集を保存しました (request_id: \`${approvalKey}\`)`, flags: MessageFlags.Ephemeral });
 }
 
@@ -454,7 +433,6 @@ async function handleButton(interaction) {
 			components: [buildApprovalButtons(key, 'rejected')],
 		});
 		await patchSubmitterReceipt(updated, key);
-		await patchPublicNotification(updated, key);
 		await notifySubmitter(updated, 'rejected', approverTag, null);
 		cleanupDriveFile({ fileId: current.attachment?.driveFileId, config: misskeyConfig })
 			.catch(e => console.error('[drive cleanup on reject]', e));
@@ -480,7 +458,6 @@ async function handleButton(interaction) {
 		});
 		console.log(`[approved] ${current.attachment.name} -> :${result.name}: by ${approverTag}`);
 		await patchSubmitterReceipt(updated, key);
-		await patchPublicNotification(updated, key);
 		await notifySubmitter(updated, 'approved', approverTag, result.name);
 		remove(key);
 	} else {
@@ -490,7 +467,6 @@ async function handleButton(interaction) {
 			components: [buildApprovalButtons(key, 'pending')],
 		});
 		await patchSubmitterReceipt(updated, key);
-		await patchPublicNotification(updated, key);
 		console.log(`[approve-failed] ${current.attachment.name}: ${result.error}`);
 	}
 }
@@ -579,21 +555,9 @@ async function finalizeEdit(interaction, approvalKey, editSession, category, isM
 	remove(`edit-session:${approvalKey}`);
 	await patchApprovalMessage(updated, approvalKey);
 	await patchSubmitterReceipt(updated, approvalKey);
-	await patchPublicNotification(updated, approvalKey);
 
 	const confirmation = { content: `✏️ 編集を保存しました (カテゴリ: \`${category}\`)`, components: [] };
 	await interaction.update(confirmation);
-}
-
-async function patchPublicNotification(state, approvalKey) {
-	if (!state?.notificationChannelId || !state?.notificationMessageId) return;
-	try {
-		const channel = await client.channels.fetch(state.notificationChannelId);
-		const msg = await channel.messages.fetch(state.notificationMessageId);
-		await msg.edit({ embeds: [buildApprovalEmbed(approvalKey, state)], components: [] });
-	} catch (e) {
-		console.error('[patch public notification]', e);
-	}
 }
 
 async function patchSubmitterReceipt(state, approvalKey) {

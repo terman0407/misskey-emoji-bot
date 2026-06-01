@@ -18,18 +18,6 @@ import {
 	hasApproverRole,
 } from './discord.js';
 
-async function patchPublicNotification(env, approvalKey, current) {
-	if (!current?.notificationChannelId || !current?.notificationMessageId) return;
-	try {
-		await patchMessage(env.DISCORD_TOKEN, current.notificationChannelId, current.notificationMessageId, {
-			embeds: [buildApprovalEmbed(approvalKey, current)],
-			components: [],
-		});
-	} catch (e) {
-		console.error('[patch public notification]', e);
-	}
-}
-
 async function patchSubmitterReceipt(env, approvalKey, current) {
 	if (!current?.submitterInteractionToken) return;
 	const body = {
@@ -187,27 +175,6 @@ async function handleAddCommand(interaction, env, ctx, sub) {
 		}
 	})());
 
-	// Also post a read-only public notification in the submission channel
-	// (only when the approval channel is separate; otherwise the approval
-	// message above already lives in this channel).
-	if (approvalChannelId && approvalChannelId !== channelId) {
-		ctx.waitUntil((async () => {
-			try {
-				const note = await postMessage(env.DISCORD_TOKEN, channelId, {
-					embeds: [buildApprovalEmbed(approvalKey, approvalState)],
-					allowed_mentions: { parse: [] },
-				});
-				await state.update(env.STATE, approvalKey, s => ({
-					...s,
-					notificationChannelId: channelId,
-					notificationMessageId: note.id,
-				}));
-			} catch (e) {
-				console.error('[post public notification]', e);
-			}
-		})());
-	}
-
 	return {
 		type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
 		data: {
@@ -273,7 +240,6 @@ async function handleEditCommand(interaction, env, ctx, sub) {
 		})());
 	}
 	ctx.waitUntil(patchSubmitterReceipt(env, approvalKey, updated));
-	ctx.waitUntil(patchPublicNotification(env, approvalKey, updated));
 
 	return ephemeralReply(`✏️ 編集を保存しました (request_id: \`${approvalKey}\`)`);
 }
@@ -400,7 +366,6 @@ export async function handleButton(interaction, env, ctx) {
 		}));
 		ctx.waitUntil(notifySubmitter(env, updated, 'rejected', approverTag, null));
 		ctx.waitUntil(patchSubmitterReceipt(env, key, updated));
-		ctx.waitUntil(patchPublicNotification(env, key, updated));
 		ctx.waitUntil(cleanupDriveFile({
 			fileId: current.attachment?.driveFileId,
 			config: { baseUrl: env.MISSKEY_URL, token: env.MISSKEY_TOKEN },
@@ -455,7 +420,6 @@ async function handleApproveBackground(env, interaction, key, current, approverT
 		}
 		console.log(`[approved] ${current.attachment.name} -> :${result.name}: (id=${result.id}) by ${approverTag}`);
 		await patchSubmitterReceipt(env, key, updated);
-		await patchPublicNotification(env, key, updated);
 		await notifySubmitter(env, updated, 'approved', approverTag, result.name);
 		await state.remove(env.STATE, key);
 	} else {
@@ -469,7 +433,6 @@ async function handleApproveBackground(env, interaction, key, current, approverT
 			console.error('[patch failed message]', e);
 		}
 		await patchSubmitterReceipt(env, key, updated);
-		await patchPublicNotification(env, key, updated);
 		console.log(`[approve-failed] ${current.attachment.name} by ${approverTag}: ${result.error}`);
 	}
 }
@@ -593,7 +556,6 @@ async function finalizeEdit(env, ctx, approvalKey, editSession, category) {
 		})());
 	}
 	ctx.waitUntil(patchSubmitterReceipt(env, approvalKey, updated));
-	ctx.waitUntil(patchPublicNotification(env, approvalKey, updated));
 
 	return updateMessageEphemeral(`✏️ 編集を保存しました (カテゴリ: \`${category}\`)`);
 }
