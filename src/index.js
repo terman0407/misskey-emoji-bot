@@ -6,7 +6,7 @@ import {
 	StringSelectMenuBuilder, StringSelectMenuOptionBuilder,
 } from 'discord.js';
 import { sanitizeEmojiName, isValidEmojiName } from './sanitize.js';
-import { ALLOWED_TYPES, registerEmojiFromAttachment } from './register.js';
+import { ALLOWED_TYPES, downloadAndUploadToDrive, registerEmojiByFileId, cleanupDriveFile } from './register.js';
 import { fetchAllCategories } from './misskey.js';
 import { put, peek, update, remove, newKey, listPendingApprovals } from './state.js';
 
@@ -245,13 +245,30 @@ async function handleAddCommand(interaction) {
 		localOnly,
 	};
 
+	// Pre-upload to Misskey drive so the approval flow doesn't rely on Discord's
+	// signed CDN URL (which expires in ~24h).
+	await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+	const upload = await downloadAndUploadToDrive({
+		attachment: { name: attachment.name, url: attachment.url, contentType: attachment.contentType },
+		config: misskeyConfig,
+	});
+	if (!upload.ok) {
+		await interaction.editReply({ content: `❌ 画像の保存に失敗しました: ${upload.error}` });
+		return;
+	}
+
 	const approvalKey = newKey();
 	const targetChannelId = approvalChannelId || interaction.channelId;
 	const approvalState = {
 		submitterId: interaction.user.id,
 		submitterTag: interaction.user.tag,
 		channelId: interaction.channelId,
-		attachment: { name: attachment.name, url: attachment.url, contentType: attachment.contentType },
+		attachment: {
+			name: attachment.name,
+			contentType: attachment.contentType,
+			driveFileId: upload.fileId,
+			url: upload.url,
+		},
 		meta,
 		status: 'pending',
 		approvalChannelId: targetChannelId,
@@ -275,11 +292,10 @@ async function handleAddCommand(interaction) {
 		console.error('[post approval-message]', e);
 	}
 
-	await interaction.reply({
+	await interaction.editReply({
 		content: `📥 申請を受け付けました (request_id: \`${approvalKey}\`)。承認をお待ちください。`,
 		embeds: [buildApprovalEmbed(approvalKey, approvalState)],
 		components: [buildSubmitterReceiptButtons(approvalKey)],
-		flags: MessageFlags.Ephemeral,
 	});
 }
 
@@ -418,14 +434,19 @@ async function handleButton(interaction) {
 		});
 		await patchSubmitterReceipt(updated, key);
 		await notifySubmitter(updated, 'rejected', approverTag, null);
+		cleanupDriveFile({ fileId: current.attachment?.driveFileId, config: misskeyConfig })
+			.catch(e => console.error('[drive cleanup on reject]', e));
 		return;
 	}
 
 	// approve
 	await interaction.deferUpdate();
-	const result = await registerEmojiFromAttachment({
-		attachment: current.attachment, meta: current.meta, defaults, config: misskeyConfig,
-	});
+	const fileId = current.attachment?.driveFileId;
+	const result = fileId
+		? await registerEmojiByFileId({
+			fileId, meta: current.meta, defaults, config: misskeyConfig,
+		})
+		: { ok: false, error: 'ドライブにアップロード済みファイルが見つかりません。再申請してください。' };
 	if (result.ok) {
 		const updated = update(key, s => ({
 			...s, status: 'approved', approverTag, approverId: userId,

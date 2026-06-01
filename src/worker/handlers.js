@@ -1,5 +1,5 @@
 import { sanitizeEmojiName, isValidEmojiName } from '../sanitize.js';
-import { ALLOWED_TYPES } from '../register.js';
+import { ALLOWED_TYPES, downloadAndUploadToDrive, registerEmojiByFileId, cleanupDriveFile } from '../register.js';
 import { fetchAllCategories } from '../misskey.js';
 import * as state from './state.js';
 import {
@@ -119,6 +119,20 @@ async function handleAddCommand(interaction, env, ctx, sub) {
 		localOnly: !!opts.localonly,
 	};
 
+	// Upload to Misskey drive immediately so the approval flow doesn't depend on
+	// Discord's expiring CDN URL (signed URLs only last ~24h).
+	const upload = await downloadAndUploadToDrive({
+		attachment: {
+			name: attachment.filename,
+			url: attachment.url,
+			contentType: attachment.content_type,
+		},
+		config: { baseUrl: env.MISSKEY_URL, token: env.MISSKEY_TOKEN },
+	});
+	if (!upload.ok) {
+		return ephemeralReply(`❌ 画像の保存に失敗しました: ${upload.error}`);
+	}
+
 	const approvalKey = state.newKey();
 	const submitterId = interaction.member?.user?.id ?? interaction.user?.id;
 	const submitterTag = (interaction.member?.user ?? interaction.user)?.username;
@@ -133,8 +147,9 @@ async function handleAddCommand(interaction, env, ctx, sub) {
 		channelId,
 		attachment: {
 			name: attachment.filename,
-			url: attachment.url,
 			contentType: attachment.content_type,
+			driveFileId: upload.fileId,
+			url: upload.url,
 		},
 		meta,
 		status: 'pending',
@@ -351,6 +366,10 @@ export async function handleButton(interaction, env, ctx) {
 		}));
 		ctx.waitUntil(notifySubmitter(env, updated, 'rejected', approverTag, null));
 		ctx.waitUntil(patchSubmitterReceipt(env, key, updated));
+		ctx.waitUntil(cleanupDriveFile({
+			fileId: current.attachment?.driveFileId,
+			config: { baseUrl: env.MISSKEY_URL, token: env.MISSKEY_TOKEN },
+		}));
 		return {
 			type: InteractionResponseType.UPDATE_MESSAGE,
 			data: {
@@ -366,16 +385,18 @@ export async function handleButton(interaction, env, ctx) {
 }
 
 async function handleApproveBackground(env, interaction, key, current, approverTag, approverId) {
-	const { registerEmojiFromAttachment } = await import('../register.js');
-	const result = await registerEmojiFromAttachment({
-		attachment: current.attachment,
-		meta: current.meta,
-		defaults: {
-			category: env.DEFAULT_CATEGORY || null,
-			license: env.DEFAULT_LICENSE || null,
-		},
-		config: { baseUrl: env.MISSKEY_URL, token: env.MISSKEY_TOKEN },
-	});
+	const fileId = current.attachment?.driveFileId;
+	const result = fileId
+		? await registerEmojiByFileId({
+			fileId,
+			meta: current.meta,
+			defaults: {
+				category: env.DEFAULT_CATEGORY || null,
+				license: env.DEFAULT_LICENSE || null,
+			},
+			config: { baseUrl: env.MISSKEY_URL, token: env.MISSKEY_TOKEN },
+		})
+		: { ok: false, error: 'ドライブにアップロード済みファイルが見つかりません。再申請してください。' };
 
 	const channelId = interaction.message.channel_id;
 	const messageId = interaction.message.id;

@@ -1,5 +1,5 @@
 import { sanitizeEmojiName, isValidEmojiName } from './sanitize.js';
-import { uploadDriveFile, addEmoji, MisskeyApiError, MisskeyNetworkError } from './misskey.js';
+import { uploadDriveFile, addEmoji, deleteDriveFile, MisskeyApiError, MisskeyNetworkError } from './misskey.js';
 
 export const ALLOWED_TYPES = new Set([
 	'image/png',
@@ -21,7 +21,7 @@ const FRIENDLY_BY_CODE = {
 	RATE_LIMIT_EXCEEDED: 'Misskey 側のレート制限に達しました。しばらく待ってからやり直してください。',
 };
 
-function friendlyError(e) {
+export function friendlyMisskeyError(e) {
 	if (e instanceof MisskeyApiError) {
 		if (e.code && FRIENDLY_BY_CODE[e.code]) return FRIENDLY_BY_CODE[e.code];
 		if (e.status === 401 || e.status === 403) {
@@ -37,22 +37,11 @@ function friendlyError(e) {
 	return e?.message ?? '不明なエラー';
 }
 
-export async function registerEmojiFromAttachment({ attachment, meta, defaults, config }) {
+export async function downloadAndUploadToDrive({ attachment, config }) {
 	if (!ALLOWED_TYPES.has(attachment.contentType ?? '')) {
 		return {
 			ok: false,
-			file: attachment.name,
 			error: `対応していない画像形式です: \`${attachment.contentType ?? 'unknown'}\` (PNG/GIF/WEBP/APNG/JPEG のみ対応)`,
-		};
-	}
-
-	const rawName = meta.name ?? attachment.name;
-	const name = isValidEmojiName(rawName) ? rawName : sanitizeEmojiName(rawName);
-	if (!isValidEmojiName(name)) {
-		return {
-			ok: false,
-			file: attachment.name,
-			error: `絵文字名を決められませんでした (元: \`${rawName}\`)。a-z 0-9 _ のみ使用可能なので手動で指定してください。`,
 		};
 	}
 
@@ -60,7 +49,6 @@ export async function registerEmojiFromAttachment({ attachment, meta, defaults, 
 	if (!dlRes.ok) {
 		return {
 			ok: false,
-			file: attachment.name,
 			error: `Discord から画像をダウンロードできませんでした (HTTP ${dlRes.status})`,
 		};
 	}
@@ -74,11 +62,27 @@ export async function registerEmojiFromAttachment({ attachment, meta, defaults, 
 			name: attachment.name,
 			contentType: attachment.contentType,
 		});
+		return { ok: true, fileId: uploaded.id, url: uploaded.url, name: uploaded.name };
+	} catch (e) {
+		console.error(`[drive upload error] ${attachment.name}:`, e);
+		return { ok: false, error: friendlyMisskeyError(e) };
+	}
+}
 
+export async function registerEmojiByFileId({ fileId, meta, defaults, config }) {
+	const rawName = meta.name;
+	const name = isValidEmojiName(rawName) ? rawName : sanitizeEmojiName(rawName ?? '');
+	if (!isValidEmojiName(name)) {
+		return {
+			ok: false,
+			error: `絵文字名を決められませんでした (元: \`${rawName}\`)。a-z 0-9 _ のみ使用可能なので手動で指定してください。`,
+		};
+	}
+	try {
 		const emoji = await addEmoji({
 			baseUrl: config.baseUrl,
 			token: config.token,
-			fileId: uploaded.id,
+			fileId,
 			name,
 			category: meta.category ?? defaults.category ?? null,
 			aliases: meta.aliases ?? [],
@@ -86,17 +90,18 @@ export async function registerEmojiFromAttachment({ attachment, meta, defaults, 
 			isSensitive: meta.isSensitive,
 			localOnly: meta.localOnly,
 		});
-
-		return { ok: true, file: attachment.name, name: emoji.name, id: emoji.id };
+		return { ok: true, name: emoji.name, id: emoji.id };
 	} catch (e) {
-		console.error(`[misskey error] ${attachment.name}:`, e);
-		return { ok: false, file: attachment.name, error: friendlyError(e) };
+		console.error('[admin/emoji/add error]', e);
+		return { ok: false, error: friendlyMisskeyError(e) };
 	}
 }
 
-export function formatResults(results) {
-	return results.map(r => {
-		if (r.ok) return `✅ \`${r.file}\` → \`:${r.name}:\``;
-		return `❌ \`${r.file}\` — ${r.error}`;
-	}).join('\n');
+export async function cleanupDriveFile({ fileId, config }) {
+	if (!fileId) return;
+	try {
+		await deleteDriveFile({ baseUrl: config.baseUrl, token: config.token, fileId });
+	} catch (e) {
+		console.error(`[drive delete] fileId=${fileId}`, e);
+	}
 }
