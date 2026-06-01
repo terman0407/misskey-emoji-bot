@@ -35,7 +35,17 @@ Discord から **Misskey カスタム絵文字** を承認制で登録できる 
   - Bot Token
   - Application (Client) ID
   - **Public Key** (HTTP Interactions の署名検証で必須)
-  - サーバーに招待するときに `bot` + `applications.commands` スコープ
+  - 招待時の **OAuth Scopes**: `bot` + `applications.commands`
+  - 招待時の **Bot Permissions** (下記。整数値: `117760`)
+    - **View Channel** (チャンネルを見る) — チャンネル認識
+    - **Send Messages** (メッセージを送信) — 承認メッセージ・公開通知の投稿
+    - **Embed Links** (埋め込みリンク) — embed 内の画像表示
+    - **Read Message History** (メッセージ履歴を読む) — Bot 自身のメッセージを PATCH (編集) するため
+  - 招待 URL 例:
+    ```
+    https://discord.com/api/oauth2/authorize?client_id=<APP_ID>&scope=bot+applications.commands&permissions=117760
+    ```
+    Developer Portal の **OAuth2 → URL Generator** から同じものを生成可能
 - **Misskey アカウントのアクセストークン** (下記スコープが必要)
   - `write:drive` — 画像をドライブにアップロード (`drive/files/create`)
   - `write:admin:emoji` — 絵文字を登録 (`admin/emoji/add`)
