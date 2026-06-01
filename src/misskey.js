@@ -33,7 +33,21 @@ async function callApi(url, options, endpoint) {
 		try { body = await res.json(); } catch { body = null; }
 		throw new MisskeyApiError(endpoint, res.status, body);
 	}
-	return res.json();
+	if (res.status === 204) return null;
+	const text = await res.text();
+	if (!text) return null;
+	try { return JSON.parse(text); } catch { return text; }
+}
+
+export async function deleteDriveFile({ baseUrl, token, fileId }) {
+	return callApi(`${baseUrl}/api/drive/files/delete`, {
+		method: 'POST',
+		headers: {
+			Authorization: `Bearer ${token}`,
+			'Content-Type': 'application/json',
+		},
+		body: JSON.stringify({ fileId }),
+	}, 'drive/files/delete');
 }
 
 export async function uploadDriveFile({ baseUrl, token, data, name, contentType }) {
