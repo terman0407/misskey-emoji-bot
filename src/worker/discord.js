@@ -94,10 +94,12 @@ export function buildApprovalEmbed(key, state) {
 	const color = status === 'pending' ? 0xffaa00
 		: status === 'approved' ? 0x44cc44
 		: status === 'rejected' ? 0xcc4444
+		: status === 'cancelled' ? 0x888888
 		: 0x888888;
 	const title = status === 'pending' ? '📥 絵文字登録リクエスト'
 		: status === 'approved' ? `✅ 登録完了 → \`:${state.registeredName ?? m.name}:\``
 		: status === 'rejected' ? '❌ 却下'
+		: status === 'cancelled' ? '🚫 取り消し'
 		: '⚠️ エラー';
 
 	const fields = [
@@ -128,6 +130,7 @@ export function buildSubmitterReceiptButtons(key) {
 		type: ComponentType.ACTION_ROW,
 		components: [
 			{ type: ComponentType.BUTTON, custom_id: `emoji-edit:${key}`, label: '編集', emoji: { name: '✏️' }, style: ButtonStyle.SECONDARY },
+			{ type: ComponentType.BUTTON, custom_id: `emoji-cancel:${key}`, label: '取り消し', emoji: { name: '🚫' }, style: ButtonStyle.DANGER },
 		],
 	};
 }

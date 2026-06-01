@@ -16,5 +16,24 @@
 			"binding": "STATE",
 			"id": "REPLACE_WITH_KV_NAMESPACE_ID"
 		}
-	]
+	],
+	// R2 bucket names and the public URL base are deployment-specific.
+	// After cloning, run `npx wrangler r2 bucket create <name>` (or use an
+	// existing bucket) and replace the placeholders below. The public URL
+	// base must match how you've exposed the bucket (custom domain or the
+	// generated `pub-*.r2.dev` URL).
+	"r2_buckets": [
+		{
+			"binding": "EMOJI_BUCKET",
+			"bucket_name": "REPLACE_WITH_R2_BUCKET_NAME"
+		}
+	],
+	"vars": {
+		// R2 オブジェクトキーは `${R2_KEY_PREFIX}${approvalKey}` 形式。
+		// 公開 URL = R2_PUBLIC_URL_BASE + key
+		// 例: R2_PUBLIC_URL_BASE="https://file.example.com/", R2_KEY_PREFIX="emoji/"
+		//     → https://file.example.com/emoji/<approvalKey>
+		"R2_PUBLIC_URL_BASE": "REPLACE_WITH_R2_PUBLIC_URL_BASE",
+		"R2_KEY_PREFIX": "emoji/"
+	}
 }
