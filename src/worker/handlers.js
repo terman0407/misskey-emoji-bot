@@ -1,5 +1,5 @@
 import { sanitizeEmojiName, isValidEmojiName } from '../sanitize.js';
-import { ALLOWED_TYPES, downloadAndUploadToDrive, registerEmojiByFileId, cleanupDriveFile } from '../register.js';
+import { ALLOWED_TYPES, downloadAttachment, uploadBufferToDrive, registerEmojiByFileId, cleanupDriveFile } from '../register.js';
 import { fetchAllCategories } from '../misskey.js';
 import * as state from './state.js';
 import {
@@ -17,6 +17,15 @@ import {
 	readModalField,
 	hasApproverRole,
 } from './discord.js';
+
+async function deleteR2Image(env, r2Key) {
+	if (!r2Key) return;
+	try {
+		await env.EMOJI_BUCKET.delete(r2Key);
+	} catch (e) {
+		console.error('[r2 delete]', e);
+	}
+}
 
 async function patchSubmitterReceipt(env, approvalKey, current) {
 	if (!current?.submitterInteractionToken) return;
@@ -119,21 +128,30 @@ async function handleAddCommand(interaction, env, ctx, sub) {
 		localOnly: !!opts.localonly,
 	};
 
-	// Upload to Misskey drive immediately so the approval flow doesn't depend on
-	// Discord's expiring CDN URL (signed URLs only last ~24h).
-	const upload = await downloadAndUploadToDrive({
-		attachment: {
-			name: attachment.filename,
-			url: attachment.url,
-			contentType: attachment.content_type,
-		},
-		config: { baseUrl: env.MISSKEY_URL, token: env.MISSKEY_TOKEN },
+	// Download from Discord and store the image in R2 (instead of pushing to
+	// Misskey drive immediately). This way the submitter can cancel before
+	// approval and nothing ever lands in Misskey.
+	const dl = await downloadAttachment({
+		name: attachment.filename,
+		url: attachment.url,
+		contentType: attachment.content_type,
 	});
-	if (!upload.ok) {
-		return ephemeralReply(`❌ 画像の保存に失敗しました: ${upload.error}`);
+	if (!dl.ok) {
+		return ephemeralReply(`❌ 画像の保存に失敗しました: ${dl.error}`);
 	}
 
 	const approvalKey = state.newKey();
+	const r2Key = `${env.R2_KEY_PREFIX}${approvalKey}`;
+	try {
+		await env.EMOJI_BUCKET.put(r2Key, dl.data, {
+			httpMetadata: { contentType: attachment.content_type },
+		});
+	} catch (e) {
+		console.error('[r2 put]', e);
+		return ephemeralReply(`❌ 画像の保存に失敗しました: ${e.message ?? 'R2 アップロード失敗'}`);
+	}
+	const publicUrl = `${env.R2_PUBLIC_URL_BASE}${r2Key}`;
+
 	const submitterId = interaction.member?.user?.id ?? interaction.user?.id;
 	const submitterTag = (interaction.member?.user ?? interaction.user)?.username;
 	const channelId = interaction.channel_id;
@@ -148,8 +166,8 @@ async function handleAddCommand(interaction, env, ctx, sub) {
 		attachment: {
 			name: attachment.filename,
 			contentType: attachment.content_type,
-			driveFileId: upload.fileId,
-			url: upload.url,
+			r2Key,
+			url: publicUrl,
 		},
 		meta,
 		status: 'pending',
@@ -180,12 +198,7 @@ async function handleAddCommand(interaction, env, ctx, sub) {
 		data: {
 			content: `📥 申請を受け付けました (request_id: \`${approvalKey}\`)。承認をお待ちください。`,
 			embeds: [buildApprovalEmbed(approvalKey, approvalState)],
-			components: [{
-				type: 1,
-				components: [
-					{ type: 2, custom_id: `emoji-edit:${approvalKey}`, label: '編集', emoji: { name: '✏️' }, style: 2 },
-				],
-			}],
+			components: [buildSubmitterReceiptButtons(approvalKey)],
 			flags: MessageFlags.EPHEMERAL,
 		},
 	};
@@ -333,6 +346,7 @@ export async function handleButton(interaction, env, ctx) {
 	const action = prefix === 'emoji-approve' ? 'approve'
 		: prefix === 'emoji-reject' ? 'reject'
 		: prefix === 'emoji-edit' ? 'edit'
+		: prefix === 'emoji-cancel' ? 'cancel'
 		: null;
 	if (!action) return ephemeralReply('Unknown button.');
 
@@ -356,6 +370,41 @@ export async function handleButton(interaction, env, ctx) {
 		return modalResponse(buildEditModal(key, current.meta));
 	}
 
+	if (action === 'cancel') {
+		if (!isSubmitter) {
+			return ephemeralReply('🔒 取り消しは申請者本人のみ可能です。承認者は ❌ 却下を使用してください。');
+		}
+		const updated = await state.update(env.STATE, key, s => ({ ...s, status: 'cancelled' }));
+		ctx.waitUntil(deleteR2Image(env, current.attachment?.r2Key));
+		if (current.attachment?.driveFileId) {
+			ctx.waitUntil(cleanupDriveFile({
+				fileId: current.attachment.driveFileId,
+				config: { baseUrl: env.MISSKEY_URL, token: env.MISSKEY_TOKEN },
+			}));
+		}
+		if (updated?.approvalChannelId && updated?.approvalMessageId) {
+			ctx.waitUntil((async () => {
+				try {
+					await patchMessage(env.DISCORD_TOKEN, updated.approvalChannelId, updated.approvalMessageId, {
+						embeds: [buildApprovalEmbed(key, updated)],
+						components: [buildApprovalButtons(key, 'cancelled')],
+					});
+				} catch (e) {
+					console.error('[patch on cancel]', e);
+				}
+			})());
+		}
+		return {
+			type: InteractionResponseType.UPDATE_MESSAGE,
+			data: {
+				content: '🚫 申請を取り消しました。',
+				embeds: [buildApprovalEmbed(key, updated)],
+				components: [],
+				flags: MessageFlags.EPHEMERAL,
+			},
+		};
+	}
+
 	if (!isApprover) return ephemeralReply('🔒 承認権限がありません。');
 
 	const approverTag = (interaction.member?.user ?? interaction.user)?.username;
@@ -366,10 +415,13 @@ export async function handleButton(interaction, env, ctx) {
 		}));
 		ctx.waitUntil(notifySubmitter(env, updated, 'rejected', approverTag, null));
 		ctx.waitUntil(patchSubmitterReceipt(env, key, updated));
-		ctx.waitUntil(cleanupDriveFile({
-			fileId: current.attachment?.driveFileId,
-			config: { baseUrl: env.MISSKEY_URL, token: env.MISSKEY_TOKEN },
-		}));
+		ctx.waitUntil(deleteR2Image(env, current.attachment?.r2Key));
+		if (current.attachment?.driveFileId) {
+			ctx.waitUntil(cleanupDriveFile({
+				fileId: current.attachment.driveFileId,
+				config: { baseUrl: env.MISSKEY_URL, token: env.MISSKEY_TOKEN },
+			}));
+		}
 		return {
 			type: InteractionResponseType.UPDATE_MESSAGE,
 			data: {
@@ -385,18 +437,46 @@ export async function handleButton(interaction, env, ctx) {
 }
 
 async function handleApproveBackground(env, interaction, key, current, approverTag, approverId) {
-	const fileId = current.attachment?.driveFileId;
+	const config = { baseUrl: env.MISSKEY_URL, token: env.MISSKEY_TOKEN };
+	const defaults = { category: env.DEFAULT_CATEGORY || null, license: env.DEFAULT_LICENSE || null };
+
+	// At approval time, ensure we have a Misskey drive fileId. New requests are
+	// stored in R2 and need to be uploaded to the drive here; older pending
+	// requests already have driveFileId from the previous pre-upload flow.
+	let fileId = current.attachment?.driveFileId;
+	let driveUrl = null;
+	if (!fileId && current.attachment?.r2Key) {
+		const obj = await env.EMOJI_BUCKET.get(current.attachment.r2Key);
+		if (!obj) {
+			const updated = await state.update(env.STATE, key, s => ({ ...s, status: 'pending', error: 'R2 から画像を取得できませんでした (削除済み or 期限切れ)。' }));
+			await patchMessage(env.DISCORD_TOKEN, interaction.message.channel_id, interaction.message.id, {
+				embeds: [buildApprovalEmbed(key, updated)],
+				components: [buildApprovalButtons(key, 'pending')],
+			}).catch(e => console.error('[patch on r2-miss]', e));
+			return;
+		}
+		const data = await obj.arrayBuffer();
+		const upload = await uploadBufferToDrive({
+			data,
+			name: current.attachment.name,
+			contentType: current.attachment.contentType,
+			config,
+		});
+		if (!upload.ok) {
+			const updated = await state.update(env.STATE, key, s => ({ ...s, status: 'pending', error: upload.error }));
+			await patchMessage(env.DISCORD_TOKEN, interaction.message.channel_id, interaction.message.id, {
+				embeds: [buildApprovalEmbed(key, updated)],
+				components: [buildApprovalButtons(key, 'pending')],
+			}).catch(e => console.error('[patch on drive-upload-fail]', e));
+			return;
+		}
+		fileId = upload.fileId;
+		driveUrl = upload.url;
+	}
+
 	const result = fileId
-		? await registerEmojiByFileId({
-			fileId,
-			meta: current.meta,
-			defaults: {
-				category: env.DEFAULT_CATEGORY || null,
-				license: env.DEFAULT_LICENSE || null,
-			},
-			config: { baseUrl: env.MISSKEY_URL, token: env.MISSKEY_TOKEN },
-		})
-		: { ok: false, error: 'ドライブにアップロード済みファイルが見つかりません。再申請してください。' };
+		? await registerEmojiByFileId({ fileId, meta: current.meta, defaults, config })
+		: { ok: false, error: '画像ファイルが見つかりません。再申請してください。' };
 
 	const channelId = interaction.message.channel_id;
 	const messageId = interaction.message.id;
@@ -409,6 +489,7 @@ async function handleApproveBackground(env, interaction, key, current, approverT
 			approverId,
 			registeredName: result.name,
 			registeredId: result.id,
+			attachment: { ...s.attachment, url: driveUrl ?? s.attachment.url },
 		}));
 		try {
 			await patchMessage(env.DISCORD_TOKEN, channelId, messageId, {
@@ -420,6 +501,7 @@ async function handleApproveBackground(env, interaction, key, current, approverT
 		}
 		console.log(`[approved] ${current.attachment.name} -> :${result.name}: (id=${result.id}) by ${approverTag}`);
 		await patchSubmitterReceipt(env, key, updated);
+		await deleteR2Image(env, current.attachment?.r2Key);
 		await notifySubmitter(env, updated, 'approved', approverTag, result.name);
 		await state.remove(env.STATE, key);
 	} else {

@@ -16,5 +16,17 @@
 			"binding": "STATE",
 			"id": "REPLACE_WITH_KV_NAMESPACE_ID"
 		}
-	]
+	],
+	"r2_buckets": [
+		{
+			"binding": "EMOJI_BUCKET",
+			"bucket_name": "misskey-design"
+		}
+	],
+	"vars": {
+		// R2 オブジェクトキーは `emoji/<approvalKey>` 形式。
+		// 公開 URL = R2_PUBLIC_URL_BASE + key
+		"R2_PUBLIC_URL_BASE": "https://file.misskey.design/",
+		"R2_KEY_PREFIX": "emoji/"
+	}
 }

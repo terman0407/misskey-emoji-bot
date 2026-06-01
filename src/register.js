@@ -38,13 +38,18 @@ export function friendlyMisskeyError(e) {
 }
 
 export async function downloadAndUploadToDrive({ attachment, config }) {
+	const dl = await downloadAttachment(attachment);
+	if (!dl.ok) return dl;
+	return uploadBufferToDrive({ data: dl.data, name: attachment.name, contentType: attachment.contentType, config });
+}
+
+export async function downloadAttachment(attachment) {
 	if (!ALLOWED_TYPES.has(attachment.contentType ?? '')) {
 		return {
 			ok: false,
 			error: `対応していない画像形式です: \`${attachment.contentType ?? 'unknown'}\` (PNG/GIF/WEBP/APNG/JPEG のみ対応)`,
 		};
 	}
-
 	const dlRes = await fetch(attachment.url).catch(e => ({ ok: false, status: 0, _err: e }));
 	if (!dlRes.ok) {
 		return {
@@ -52,19 +57,21 @@ export async function downloadAndUploadToDrive({ attachment, config }) {
 			error: `Discord から画像をダウンロードできませんでした (HTTP ${dlRes.status})`,
 		};
 	}
-	const data = await dlRes.arrayBuffer();
+	return { ok: true, data: await dlRes.arrayBuffer() };
+}
 
+export async function uploadBufferToDrive({ data, name, contentType, config }) {
 	try {
 		const uploaded = await uploadDriveFile({
 			baseUrl: config.baseUrl,
 			token: config.token,
 			data,
-			name: attachment.name,
-			contentType: attachment.contentType,
+			name,
+			contentType,
 		});
 		return { ok: true, fileId: uploaded.id, url: uploaded.url, name: uploaded.name };
 	} catch (e) {
-		console.error(`[drive upload error] ${attachment.name}:`, e);
+		console.error(`[drive upload error] ${name}:`, e);
 		return { ok: false, error: friendlyMisskeyError(e) };
 	}
 }
