@@ -524,14 +524,24 @@ async function notifySubmitter(env, current, status, approverTag, registeredName
 	if (current.channelId === current.approvalChannelId) return;
 
 	const mention = `<@${current.submitterId}>`;
-	let content;
 	if (status === 'approved') {
-		content = `✅ ${mention} 申請された絵文字 \`:${registeredName}:\` が登録されました (by ${approverTag})`;
-	} else if (status === 'rejected') {
-		content = `❌ ${mention} 申請が却下されました (by ${approverTag})`;
-	} else {
+		// メンションなしの承認完了通知 (画像付き)
+		try {
+			await postMessage(env.DISCORD_TOKEN, current.channelId, {
+				content: `✅ 申請された絵文字 \`:${registeredName}:\` が登録されました (by \`${approverTag}\`)`,
+				embeds: [{
+					color: 0x44cc44,
+					image: { url: current.attachment.url },
+				}],
+				allowed_mentions: { parse: [] },
+			});
+		} catch (e) {
+			console.error('[notify failed]', e);
+		}
 		return;
 	}
+	if (status !== 'rejected') return;
+	const content = `❌ ${mention} 申請が却下されました (by \`${approverTag}\`)`;
 	try {
 		await postMessage(env.DISCORD_TOKEN, current.channelId, {
 			content,
