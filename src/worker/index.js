@@ -8,9 +8,8 @@ import {
 	handleSlashCommand,
 	handleButton,
 	handleAutocomplete,
+	handleAddModalSubmit,
 	handleEditModalSubmit,
-	handleCategoryEditSelect,
-	handleNewCategoryEditModalSubmit,
 } from './handlers.js';
 
 export default {
@@ -46,20 +45,16 @@ export default {
 			}
 
 			if (interaction.type === InteractionType.MESSAGE_COMPONENT) {
-				const customId = interaction.data.custom_id;
-				if (customId.startsWith('emoji-cat-edit-select:')) {
-					return json(await handleCategoryEditSelect(interaction, env, ctx, customId.slice('emoji-cat-edit-select:'.length)));
-				}
 				return json(await handleButton(interaction, env, ctx));
 			}
 
 			if (interaction.type === InteractionType.MODAL_SUBMIT) {
 				const customId = interaction.data.custom_id;
+				if (customId.startsWith('emoji-add-modal:')) {
+					return json(await handleAddModalSubmit(interaction, env, ctx, customId.slice('emoji-add-modal:'.length)));
+				}
 				if (customId.startsWith('emoji-edit-modal:')) {
 					return json(await handleEditModalSubmit(interaction, env, ctx, customId.slice('emoji-edit-modal:'.length)));
-				}
-				if (customId.startsWith('emoji-cat-edit-new:')) {
-					return json(await handleNewCategoryEditModalSubmit(interaction, env, ctx, customId.slice('emoji-cat-edit-new:'.length)));
 				}
 				return json({
 					type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,

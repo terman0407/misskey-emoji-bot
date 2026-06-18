@@ -10,35 +10,7 @@ export const data = new SlashCommandBuilder()
 		.addAttachmentOption(o => o
 			.setName('image')
 			.setDescription('絵文字にする画像 (PNG/GIF/WEBP/APNG/JPEG)')
-			.setRequired(true))
-		.addStringOption(o => o
-			.setName('category')
-			.setDescription('カテゴリ (タイプして検索 / 新規も可)')
-			.setRequired(true)
-			.setAutocomplete(true))
-		.addStringOption(o => o
-			.setName('name')
-			.setDescription('絵文字名 (a-z 0-9 _。省略時はファイル名から生成)')
-			.setRequired(false)
-			.setMaxLength(128))
-		.addStringOption(o => o
-			.setName('tags')
-			.setDescription('タグ (カンマ区切り)')
-			.setRequired(false)
-			.setMaxLength(256))
-		.addStringOption(o => o
-			.setName('license')
-			.setDescription('ライセンス')
-			.setRequired(false)
-			.setMaxLength(256))
-		.addBooleanOption(o => o
-			.setName('sensitive')
-			.setDescription('センシティブ扱いにする')
-			.setRequired(false))
-		.addBooleanOption(o => o
-			.setName('localonly')
-			.setDescription('ローカル限定 (連合しない)')
-			.setRequired(false)))
+			.setRequired(true)))
 	.addSubcommand(sub => sub
 		.setName('edit')
 		.setDescription('保留中の絵文字申請を編集')

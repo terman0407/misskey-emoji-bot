@@ -2,17 +2,19 @@
 
 Discord から **Misskey カスタム絵文字** を承認制で登録できる Discord Bot。**Cloudflare Workers (HTTP Interactions)** で動くサーバーレス構成です。
 
-`/emoji add` で画像とメタデータを送ると、承認用チャンネルにリクエストが投稿され、承認ロールを持つメンバーが ✅ 承認 / ❌ 却下 / ✏️ 編集 のボタンで処理できます。
+`/emoji add` で画像を送るとモーダルが開き、メタデータを入力して申請できます。承認用チャンネルにリクエストが投稿され、承認ロールを持つメンバーが ✅ 承認 / ❌ 却下 / ✏️ 編集 のボタンで処理できます。
 
 ## 主な機能
 
-- **`/emoji add`** スラッシュコマンドで 1 コマンド申請 (画像 + カテゴリ + 任意で名前 / タグ / ライセンス / sensitive / localonly)
-- **カテゴリ autocomplete** — タイプで Misskey 上の既存カテゴリを検索、「✨ 新規」で新規作成も可
+- **`/emoji add image:<画像>`** → モーダルで **名前 / カテゴリ / タグ / ライセンス / オプション (sensitive・localonly)** を入力して申請
+- **カテゴリはドロップダウン選択** — Misskey 上の既存カテゴリを**使用頻度順の上位25件**から選択 (Discord の select は最大25件・検索不可のため)。一覧に無い新規カテゴリで登録したい場合は、登録後に `/emoji edit` で変更
+- **テキストはモーダル入力なので原文を保持** — ライセンス等に `@user@host` を書いても、Discord のメンション自動変換で `@user` 部分が `<@id>` に化ける問題を回避
+- **sensitive / localonly はチェックボックス** (Checkbox Group)
 - 申請内容は **承認チャンネル** に Embed + ボタン付きで投稿
 - ✅ **承認** で Misskey ドライブへアップロード→ `admin/emoji/add` で登録
 - ❌ **却下**
-- ✏️ **編集** ボタン (申請者または承認者) → モーダル (名前/タグ/ライセンス) → カテゴリ select (検索付き) → 確定
-- `/emoji edit request_id:<autocomplete>` でコマンドからも編集可
+- ✏️ **編集** ボタン (申請者または承認者) → **1 枚のモーダル** (名前 / カテゴリ select / タグ / ライセンス / オプション、現在値プリフィル) → 確定
+- `/emoji edit request_id:<autocomplete>` でコマンドからも編集可 (カテゴリは autocomplete で全件検索・新規作成も可)
 - 申請者には元チャンネルで承認結果を通知 (メンション付き)
 - 絵文字名は **小文字英数字とアンダーバーのみ** (`a-z 0-9 _`、大文字使用不可)。それ以外の文字はサニタイズで `_` に置換 / 小文字化
 - Misskey 側のエラーコード (`DUPLICATE_NAME`, `INAPPROPRIATE` 等) を日本語に翻訳して表示
@@ -27,7 +29,7 @@ Discord から **Misskey カスタム絵文字** を承認制で登録できる 
 | **state** | Workers KV (`expirationTtl: 7日` で自動 GC) |
 | **画像ステージ** | Cloudflare R2 — 申請時に R2 へ PUT、承認時に Misskey ドライブへ転送して R2 から削除 (PR #15 マージ後) |
 | **重い処理** | Misskey API 呼び出しは `ctx.waitUntil` で deferred response (type 6) の後にバックグラウンド実行 → Discord の 3 秒制限を確実に回避 |
-| **Embed/Button/Modal** | 生 JSON 構築 ([src/worker/discord.js](src/worker/discord.js)) — `discord.js` パッケージは Workers ランタイムでは未使用 |
+| **Embed/Button/Modal** | 生 JSON 構築 ([src/worker/discord.js](src/worker/discord.js)) — モーダルは Label (type 18) でラップした Text Input / String Select / Checkbox Group を使用。`discord.js` パッケージは Workers ランタイムでは未使用 |
 | **カテゴリキャッシュ** | `admin/emoji/list` 結果を KV に 1 時間キャッシュ |
 
 ## 必要なもの
@@ -94,7 +96,9 @@ npx wrangler secret put DEFAULT_CATEGORY
 npx wrangler secret put DEFAULT_LICENSE
 
 # 6. スラッシュコマンドを Discord に登録
-#    .env に DISCORD_TOKEN, DISCORD_CLIENT_ID, (任意) DISCORD_GUILD_ID を記載
+#    DISCORD_TOKEN と DISCORD_APPLICATION_ID (= Client ID) が必要。
+#    .env が無ければ .dev.vars を自動で読むので、ローカル開発済みなら追加設定は不要。
+#    特定サーバーに即時登録したい場合は DISCORD_GUILD_ID を設定。
 npm run register
 
 # 7. デプロイ
@@ -141,7 +145,7 @@ npm run tail
 | `DISCORD_TOKEN` | ◯ | Discord Bot のトークン |
 | `DISCORD_PUBLIC_KEY` | ◯ | Discord Application の Public Key (Ed25519 署名検証) |
 | `DISCORD_APPLICATION_ID` | ◯ | Discord Application (Client) ID |
-| `DISCORD_CLIENT_ID` | ◯ (register 時) | Discord Application (Client) ID — `npm run register` 用に `.env` に書く |
+| `DISCORD_CLIENT_ID` | × (register 時) | Client ID。未指定なら `DISCORD_APPLICATION_ID` を自動使用 (両者は同一値) |
 | `DISCORD_GUILD_ID` | △ | register 時、指定するとそのサーバーにだけコマンドを登録 (即時反映) |
 | `MISSKEY_URL` | ◯ | Misskey のベース URL (末尾 `/` なし) |
 | `MISSKEY_TOKEN` | ◯ | `write:drive` + `write:admin:emoji` + `read:admin:emoji` スコープのトークン |
@@ -159,14 +163,16 @@ npm run tail
 ### 申請
 
 ```
-/emoji add image:<画像> category:<タイプして検索 or 新規> [name:<絵文字名>] [tags:<カンマ区切り>] [license:<ライセンス>] [sensitive:<bool>] [localonly:<bool>]
+/emoji add image:<画像>
 ```
 
-- `image` (必須) — PNG / GIF / WEBP / APNG / JPEG
-- `category` (必須) — autocomplete で既存カテゴリから選択、あるいは「✨ 新規: <typed>」で新規作成
-- `name` (任意) — **小文字英数字とアンダーバーのみ** (`a-z 0-9 _`)。大文字は使用不可で、入力されても自動で小文字化されます。省略時は画像ファイル名からサニタイズして自動生成
-- `tags` / `license` (任意)
-- `sensitive` / `localonly` (任意、デフォルト false)
+`image` (必須・PNG / GIF / WEBP / APNG / JPEG) を指定して送信すると**モーダル**が開き、以下を入力します:
+
+- **絵文字名** (任意) — **小文字英数字とアンダーバーのみ** (`a-z 0-9 _`)。大文字は使用不可で、入力されても自動で小文字化されます。省略時は画像ファイル名からサニタイズして自動生成
+- **カテゴリ** — 既存カテゴリ (**使用頻度順 上位25件**) からドロップダウンで選択。カテゴリが 1 件も無い場合のみ手入力欄になる。一覧に無い新規カテゴリで登録したい場合は、登録後に `/emoji edit` で変更
+- **タグ** (任意・カンマ区切り)
+- **ライセンス** (任意) — 入力した内容がそのまま保持される (メンション化けなし)
+- **オプション** — センシティブ / ローカル限定 のチェックボックス (任意)
 
 → 承認チャンネル (or 同チャンネル) に Embed + 承認/却下/編集ボタン付きで投稿される。
 申請者には **ephemeral で受付メッセージ + 自分の申請内容の Embed (画像プレビュー付き) + ✏️ 編集ボタン** が表示される (本人のみ可視)。
@@ -183,10 +189,10 @@ npm run tail
 
 #### A. ✏️ ボタン (ワンクリック)
 1. 承認メッセージの ✏️ をクリック
-2. モーダルが開く (名前 / タグ / ライセンス、現在値プリフィル)
-3. Submit すると ephemeral にカテゴリ select (現在カテゴリも表示)
-4. 既存選択 → 確定 / 「✨ 新規」→ 新規モーダル → 確定
-5. 承認メッセージが PATCH される
+2. **1 枚のモーダル**が開く (名前 / カテゴリ select / タグ / ライセンス / オプション、現在値プリフィル)
+3. Submit すると承認メッセージが PATCH される
+
+> モーダルの select は最大25件のため、一覧に無い新規カテゴリへ変更したい場合は下記 B の `/emoji edit` (カテゴリ autocomplete・新規作成可) を使ってください。
 
 #### B. `/emoji edit` (コマンド)
 ```
@@ -212,7 +218,7 @@ npm run tail
 | `npm run dev` | ローカルで Workers を起動 (`.dev.vars` から secrets 読み込み) |
 | `npm run deploy` | Cloudflare に Workers をデプロイ |
 | `npm run tail` | デプロイ済み Workers のログをライブ表示 |
-| `npm test` | sanitize 関数のテスト |
+| `npm test` | sanitize 関数 + discord ヘルパ (メンション復元 / カテゴリ option / モーダル読み取り) のテスト |
 | `node scripts/list-commands.js` | 登録済みのスラッシュコマンドを表示 |
 
 ## ディレクトリ構成
@@ -228,8 +234,8 @@ src/
 └── worker/            # Cloudflare Workers 実装
     ├── index.js       # fetch エントリポイント、interaction type 別ルーティング
     ├── verify.js      # Ed25519 署名検証 (WebCrypto)
-    ├── handlers.js    # 全 interaction ハンドラ (slash, button, modal, autocomplete, select)
-    ├── discord.js     # Discord API helper + Embed/Button/Modal/Select の JSON ビルダ
+    ├── handlers.js    # 全 interaction ハンドラ (slash, button, modal, autocomplete)
+    ├── discord.js     # Discord API helper + Embed/Button/Modal (Text/Select/Checkbox) の JSON ビルダ
     └── state.js       # Workers KV ベースの state ストア
 
 scripts/
@@ -238,7 +244,7 @@ scripts/
 
 wrangler.jsonc             # Workers の設定 (KV namespace ID は手動で埋める)
 .dev.vars                  # ローカル secrets (gitignore 済み)
-.env                       # register-commands.js が読む (gitignore 済み)
+.env                       # register-commands.js が読む。無ければ .dev.vars にフォールバック (gitignore 済み)
 ```
 
 ## 注意
