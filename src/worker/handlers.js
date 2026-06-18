@@ -8,14 +8,17 @@ import {
 	buildApprovalEmbed,
 	buildApprovalButtons,
 	buildSubmitterReceiptButtons,
+	buildAddModal,
 	buildEditModal,
-	buildCategorySelectPayload,
-	buildNewCategoryModal,
-	CATEGORY_NEW_VALUE,
 	patchMessage,
 	postMessage,
 	readModalField,
+	readModalSelect,
+	readModalValues,
 	hasApproverRole,
+	unwrapUserMentions,
+	FLAG_SENSITIVE,
+	FLAG_LOCALONLY,
 } from './discord.js';
 
 async function deleteR2Image(env, r2Key) {
@@ -47,17 +50,10 @@ async function patchSubmitterReceipt(env, approvalKey, current) {
 	}
 }
 
-const EDIT_SESSION_TTL = 15 * 60;
+const ADD_SESSION_TTL = 15 * 60;
 
 function modalResponse(modal) {
 	return { type: InteractionResponseType.MODAL, data: modal };
-}
-
-function updateMessageEphemeral(content) {
-	return {
-		type: InteractionResponseType.UPDATE_MESSAGE,
-		data: { content, components: [], flags: MessageFlags.EPHEMERAL },
-	};
 }
 
 const CATEGORY_CACHE_KEY = 'cache:categories';
@@ -99,6 +95,10 @@ export async function handleSlashCommand(interaction, env, ctx) {
 	return ephemeralReply('Unknown subcommand.');
 }
 
+// `/emoji add` only carries the things a modal can't: the image attachment and
+// the sensitive/localonly toggles. Those are stashed in a short-lived session,
+// then a modal collects name/category/tags/license. Modals don't auto-convert
+// `@name` into Discord mention tokens, so the submitter's raw text survives.
 async function handleAddCommand(interaction, env, ctx, sub) {
 	const opts = Object.fromEntries((sub.options ?? []).map(o => [o.name, o.value]));
 	const attachmentId = opts.image;
@@ -109,32 +109,58 @@ async function handleAddCommand(interaction, env, ctx, sub) {
 		return ephemeralReply(`❌ 対応していない画像タイプです: \`${attachment.content_type ?? 'unknown'}\``);
 	}
 
-	let name = (opts.name || '').trim();
-	if (!name) name = sanitizeEmojiName(attachment.filename);
-	else if (!isValidEmojiName(name)) name = sanitizeEmojiName(name);
-	if (!isValidEmojiName(name)) {
-		return ephemeralReply(`❌ 絵文字名を決められませんでした (元: \`${opts.name || attachment.filename}\`)。a-z 0-9 _ のみ使用可能です。`);
+	const addKey = state.newKey();
+	await state.put(env.STATE, `add-session:${addKey}`, {
+		attachment: {
+			name: attachment.filename,
+			contentType: attachment.content_type,
+			url: attachment.url,
+		},
+		submitterId: interaction.member?.user?.id ?? interaction.user?.id,
+		submitterTag: (interaction.member?.user ?? interaction.user)?.username,
+		channelId: interaction.channel_id,
+	}, ADD_SESSION_TTL);
+
+	const categories = await getCachedCategories(env);
+	return modalResponse(buildAddModal(addKey, categories));
+}
+
+export async function handleAddModalSubmit(interaction, env, ctx, addKey) {
+	const session = await state.peek(env.STATE, `add-session:${addKey}`);
+	if (!session) {
+		return ephemeralReply('⏱ 入力セッションが期限切れです。もう一度 `/emoji add` からやり直してください。');
 	}
 
-	const category = (opts.category || '').trim();
-	if (!category) return ephemeralReply('❌ カテゴリは必須です。');
+	let name = readModalField(interaction, 'name');
+	if (!name) name = sanitizeEmojiName(session.attachment.name);
+	else if (!isValidEmojiName(name)) name = sanitizeEmojiName(name);
+	if (!isValidEmojiName(name)) {
+		return ephemeralReply('❌ 絵文字名を決められませんでした。a-z 0-9 _ のみ使用可能です。');
+	}
+
+	const category = (readModalField(interaction, 'category_new') || readModalSelect(interaction, 'category_select')).trim();
+	if (!category) return ephemeralReply('❌ カテゴリは必須です。一覧から選ぶか「新規カテゴリ」に入力してください。');
+
+	const tags = readModalField(interaction, 'tags');
+	const license = readModalField(interaction, 'license');
+	const flags = readModalValues(interaction, 'options');
 
 	const meta = {
 		name,
 		category,
-		aliases: opts.tags ? opts.tags.split(/[,、]/).map(s => s.trim()).filter(Boolean) : [],
-		license: opts.license || undefined,
-		isSensitive: !!opts.sensitive,
-		localOnly: !!opts.localonly,
+		aliases: tags ? tags.split(/[,、]/).map(s => s.trim()).filter(Boolean) : [],
+		license: license || undefined,
+		isSensitive: flags.includes(FLAG_SENSITIVE),
+		localOnly: flags.includes(FLAG_LOCALONLY),
 	};
 
 	// Download from Discord and store the image in R2 (instead of pushing to
 	// Misskey drive immediately). This way the submitter can cancel before
 	// approval and nothing ever lands in Misskey.
 	const dl = await downloadAttachment({
-		name: attachment.filename,
-		url: attachment.url,
-		contentType: attachment.content_type,
+		name: session.attachment.name,
+		url: session.attachment.url,
+		contentType: session.attachment.contentType,
 	});
 	if (!dl.ok) {
 		return ephemeralReply(`❌ 画像の保存に失敗しました: ${dl.error}`);
@@ -144,7 +170,7 @@ async function handleAddCommand(interaction, env, ctx, sub) {
 	const r2Key = `${env.R2_KEY_PREFIX}${approvalKey}`;
 	try {
 		await env.EMOJI_BUCKET.put(r2Key, dl.data, {
-			httpMetadata: { contentType: attachment.content_type },
+			httpMetadata: { contentType: session.attachment.contentType },
 		});
 	} catch (e) {
 		console.error('[r2 put]', e);
@@ -152,20 +178,16 @@ async function handleAddCommand(interaction, env, ctx, sub) {
 	}
 	const publicUrl = `${env.R2_PUBLIC_URL_BASE}${r2Key}`;
 
-	const submitterId = interaction.member?.user?.id ?? interaction.user?.id;
-	const submitterTag = (interaction.member?.user ?? interaction.user)?.username;
-	const channelId = interaction.channel_id;
-
 	const approvalChannelId = env.DISCORD_APPROVAL_CHANNEL_ID || null;
-	const targetChannelId = approvalChannelId || channelId;
+	const targetChannelId = approvalChannelId || session.channelId;
 
 	const approvalState = {
-		submitterId,
-		submitterTag,
-		channelId,
+		submitterId: session.submitterId,
+		submitterTag: session.submitterTag,
+		channelId: session.channelId,
 		attachment: {
-			name: attachment.filename,
-			contentType: attachment.content_type,
+			name: session.attachment.name,
+			contentType: session.attachment.contentType,
 			r2Key,
 			url: publicUrl,
 		},
@@ -175,6 +197,7 @@ async function handleAddCommand(interaction, env, ctx, sub) {
 		submitterInteractionToken: interaction.token,
 	};
 	await state.put(env.STATE, approvalKey, approvalState);
+	await state.remove(env.STATE, `add-session:${addKey}`);
 
 	ctx.waitUntil((async () => {
 		try {
@@ -183,7 +206,7 @@ async function handleAddCommand(interaction, env, ctx, sub) {
 				components: [buildApprovalButtons(approvalKey, 'pending')],
 			};
 			if (approvalChannelId) {
-				payload.content = `📥 <@${submitterId}> から絵文字登録の申請があります`;
+				payload.content = `📥 <@${session.submitterId}> から絵文字登録の申請があります`;
 				payload.allowed_mentions = { users: [] };
 			}
 			const posted = await postMessage(env.DISCORD_TOKEN, targetChannelId, payload);
@@ -223,6 +246,7 @@ async function handleEditCommand(interaction, env, ctx, sub) {
 		return ephemeralReply('🔒 編集権限がありません (申請者または承認者のみ)');
 	}
 
+	const resolved = interaction.data.resolved;
 	const newMeta = { ...current.meta };
 	if (opts.name !== undefined) {
 		let n = String(opts.name).trim();
@@ -230,11 +254,15 @@ async function handleEditCommand(interaction, env, ctx, sub) {
 		if (!isValidEmojiName(n)) return ephemeralReply('❌ 絵文字名が不正です。');
 		newMeta.name = n;
 	}
-	if (opts.category !== undefined) newMeta.category = String(opts.category).trim();
+	if (opts.category !== undefined) newMeta.category = unwrapUserMentions(String(opts.category), resolved).trim();
 	if (opts.tags !== undefined) {
-		newMeta.aliases = opts.tags ? String(opts.tags).split(/[,、]/).map(s => s.trim()).filter(Boolean) : [];
+		const tags = unwrapUserMentions(String(opts.tags), resolved);
+		newMeta.aliases = tags ? tags.split(/[,、]/).map(s => s.trim()).filter(Boolean) : [];
 	}
-	if (opts.license !== undefined) newMeta.license = opts.license || undefined;
+	if (opts.license !== undefined) {
+		const license = unwrapUserMentions(String(opts.license), resolved).trim();
+		newMeta.license = license || undefined;
+	}
 	if (opts.sensitive !== undefined) newMeta.isSensitive = !!opts.sensitive;
 	if (opts.localonly !== undefined) newMeta.localOnly = !!opts.localonly;
 
@@ -319,7 +347,7 @@ async function listPendingApprovals(env, userId, isApprover) {
 	const pending = [];
 	for (const k of list.keys) {
 		const name = k.name;
-		if (name.startsWith('session:') || name.startsWith('cache:') || name.startsWith('edit-session:')) continue;
+		if (name.startsWith('session:') || name.startsWith('cache:') || name.startsWith('add-session:')) continue;
 		const data = await env.STATE.get(name, 'json');
 		if (!data || data.status !== 'pending') continue;
 		if (!isApprover && data.submitterId !== userId) continue;
@@ -367,7 +395,8 @@ export async function handleButton(interaction, env, ctx) {
 		if (!isSubmitter && !isApprover) {
 			return ephemeralReply('🔒 編集権限がありません (申請者または承認者のみ)');
 		}
-		return modalResponse(buildEditModal(key, current.meta));
+		const categories = await getCachedCategories(env);
+		return modalResponse(buildEditModal(key, current.meta, categories));
 	}
 
 	if (action === 'cancel') {
@@ -573,67 +602,31 @@ export async function handleEditModalSubmit(interaction, env, ctx, approvalKey) 
 		return ephemeralReply('🔒 編集権限がありません');
 	}
 
-	const name = readModalField(interaction, 'name');
-	const tags = readModalField(interaction, 'tags');
-	const license = readModalField(interaction, 'license');
-
-	await state.put(env.STATE, `edit-session:${approvalKey}`, {
-		name, tags, license, editorId: userId,
-	}, EDIT_SESSION_TTL);
-
-	const categories = await getCachedCategories(env);
-	const content = `📁 **新しいカテゴリを選んでください** (現在: \`${current.meta?.category || '未設定'}\`)`;
-	return {
-		type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-		data: buildCategorySelectPayload(`emoji-cat-edit-select:${approvalKey}`, categories, content),
-	};
-}
-
-export async function handleCategoryEditSelect(interaction, env, ctx, approvalKey) {
-	const editSession = await state.peek(env.STATE, `edit-session:${approvalKey}`);
-	if (!editSession) {
-		return updateMessageEphemeral('⏱ 編集セッションが期限切れです。もう一度 ✏️ ボタンから始めてください。');
-	}
-	const selectedValue = interaction.data.values?.[0];
-	if (!selectedValue) return ephemeralReply('カテゴリを選択してください。');
-
-	if (selectedValue === CATEGORY_NEW_VALUE) {
-		return modalResponse(buildNewCategoryModal(`emoji-cat-edit-new:${approvalKey}`));
-	}
-	return finalizeEdit(env, ctx, approvalKey, editSession, selectedValue);
-}
-
-export async function handleNewCategoryEditModalSubmit(interaction, env, ctx, approvalKey) {
-	const editSession = await state.peek(env.STATE, `edit-session:${approvalKey}`);
-	if (!editSession) {
-		return ephemeralReply('⏱ 編集セッションが期限切れです。もう一度 ✏️ ボタンから始めてください。');
-	}
-	const category = readModalField(interaction, 'category');
-	if (!category) return ephemeralReply('カテゴリを入力してください。');
-	return finalizeEdit(env, ctx, approvalKey, editSession, category);
-}
-
-async function finalizeEdit(env, ctx, approvalKey, editSession, category) {
-	const current = await state.peek(env.STATE, approvalKey);
-	if (!current || current.status !== 'pending') {
-		await state.remove(env.STATE, `edit-session:${approvalKey}`);
-		return updateMessageEphemeral('⏱ このリクエストは期限切れ or 処理済みです。');
-	}
-
-	let name = editSession.name?.trim() || current.meta.name;
+	let name = readModalField(interaction, 'name') || current.meta.name;
 	if (!isValidEmojiName(name)) name = sanitizeEmojiName(name);
-	const aliases = editSession.tags
-		? editSession.tags.split(/[,、]/).map(t => t.trim()).filter(Boolean)
-		: [];
-	const license = editSession.license?.trim() || undefined;
+	if (!isValidEmojiName(name)) return ephemeralReply('❌ 絵文字名が不正です。');
+
+	const category = readModalSelect(interaction, 'category_select')
+		|| readModalField(interaction, 'category_new')
+		|| current.meta.category;
+	const tags = readModalField(interaction, 'tags');
+	const aliases = tags ? tags.split(/[,、]/).map(t => t.trim()).filter(Boolean) : [];
+	const license = readModalField(interaction, 'license') || undefined;
+	const flags = readModalValues(interaction, 'options');
 
 	const updated = await state.update(env.STATE, approvalKey, s => ({
 		...s,
-		meta: { ...s.meta, name, category, aliases, license },
+		meta: {
+			...s.meta,
+			name,
+			category,
+			aliases,
+			license,
+			isSensitive: flags.includes(FLAG_SENSITIVE),
+			localOnly: flags.includes(FLAG_LOCALONLY),
+		},
 		error: undefined,
 	}));
-
-	await state.remove(env.STATE, `edit-session:${approvalKey}`);
 
 	if (updated?.approvalChannelId && updated?.approvalMessageId) {
 		ctx.waitUntil((async () => {
@@ -649,5 +642,5 @@ async function finalizeEdit(env, ctx, approvalKey, editSession, category) {
 	}
 	ctx.waitUntil(patchSubmitterReceipt(env, approvalKey, updated));
 
-	return updateMessageEphemeral(`✏️ 編集を保存しました (カテゴリ: \`${category}\`)`);
+	return ephemeralReply(`✏️ 編集を保存しました (request_id: \`${approvalKey}\`)`);
 }

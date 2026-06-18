@@ -74,19 +74,24 @@ export async function listEmojis({ baseUrl, token, limit = 100, untilId }) {
 	}, 'admin/emoji/list');
 }
 
+// Returns distinct categories ordered by usage frequency (most-used first,
+// ties broken alphabetically). Modal dropdowns cap at 25 options with no
+// search, so the most-used categories should surface first.
 export async function fetchAllCategories({ baseUrl, token }) {
-	const categories = new Set();
+	const counts = new Map();
 	let untilId;
 	for (let i = 0; i < 50; i++) {
 		const page = await listEmojis({ baseUrl, token, limit: 100, untilId });
 		if (!Array.isArray(page) || page.length === 0) break;
 		for (const e of page) {
-			if (e.category) categories.add(e.category);
+			if (e.category) counts.set(e.category, (counts.get(e.category) ?? 0) + 1);
 		}
 		if (page.length < 100) break;
 		untilId = page[page.length - 1].id;
 	}
-	return [...categories].sort((a, b) => a.localeCompare(b));
+	return [...counts.entries()]
+		.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+		.map(([category]) => category);
 }
 
 export async function addEmoji({ baseUrl, token, fileId, name, category, aliases, license, isSensitive, localOnly }) {

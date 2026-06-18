@@ -10,7 +10,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "tail": "wrangler tail",
-    "test": "node src/sanitize.test.js"
+    "test": "node src/sanitize.test.js && node src/worker/discord.test.js"
   },
   "engines": {
     "node": ">=20.0.0"

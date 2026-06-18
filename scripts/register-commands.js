@@ -1,11 +1,19 @@
-import 'dotenv/config';
+import dotenv from 'dotenv';
 import { REST, Routes } from 'discord.js';
 import { data as emojiCommand } from '../src/commands/emoji.js';
 
-const { DISCORD_TOKEN, DISCORD_CLIENT_ID, DISCORD_GUILD_ID } = process.env;
+// Load .env if present, then fall back to the Cloudflare Workers local secrets
+// file (.dev.vars). dotenv.config() never overrides already-set vars, so real
+// environment > .env > .dev.vars.
+dotenv.config();
+dotenv.config({ path: '.dev.vars' });
+
+const { DISCORD_TOKEN, DISCORD_GUILD_ID } = process.env;
+// Discord's "Client ID" and "Application ID" are the same value.
+const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID || process.env.DISCORD_APPLICATION_ID;
 
 if (!DISCORD_TOKEN || !DISCORD_CLIENT_ID) {
-	console.error('DISCORD_TOKEN and DISCORD_CLIENT_ID are required');
+	console.error('DISCORD_TOKEN and (DISCORD_CLIENT_ID or DISCORD_APPLICATION_ID) are required');
 	process.exit(1);
 }
 
