@@ -57,7 +57,9 @@ function modalResponse(modal) {
 }
 
 const CATEGORY_CACHE_KEY = 'cache:categories';
-const CATEGORY_CACHE_TTL = 60 * 60;
+// Categories rarely change, so cache for a long time and keep it fresh by
+// appending on approval (see addCategoryToCache) rather than re-scanning.
+const CATEGORY_CACHE_TTL = 30 * 24 * 60 * 60;
 
 function ephemeralReply(content) {
 	return {
@@ -74,9 +76,13 @@ function parseRoleIds(raw) {
 	return new Set((raw ?? '').split(',').map(s => s.trim()).filter(Boolean));
 }
 
-async function getCachedCategories(env) {
-	const cached = await env.STATE.get(CATEGORY_CACHE_KEY, 'json');
-	if (cached) return cached;
+// Budget for how long a modal-building handler will wait for a cold category
+// fetch before giving up. The whole interaction must be answered within
+// Discord's 3s window, and fetchAllCategories can take many seconds against a
+// large instance, so we cap the wait and fall back to a text input.
+const CATEGORY_MODAL_FETCH_BUDGET_MS = 1500;
+
+async function refreshCategoryCache(env) {
 	try {
 		const fetched = await fetchAllCategories({ baseUrl: env.MISSKEY_URL, token: env.MISSKEY_TOKEN });
 		await env.STATE.put(CATEGORY_CACHE_KEY, JSON.stringify(fetched), { expirationTtl: CATEGORY_CACHE_TTL });
@@ -85,6 +91,42 @@ async function getCachedCategories(env) {
 		console.error('[fetch categories]', e);
 		return [];
 	}
+}
+
+async function getCachedCategories(env) {
+	const cached = await env.STATE.get(CATEGORY_CACHE_KEY, 'json');
+	if (cached) return cached;
+	return refreshCategoryCache(env);
+}
+
+// Keep the long-lived category cache current by folding in the category of a
+// just-approved emoji, so new categories show up without a full re-scan. If no
+// cache exists yet we skip it — the next cold read rebuilds the full list
+// (seeding with a single category would hide every other one for 30 days).
+async function addCategoryToCache(env, category) {
+	if (!category) return;
+	try {
+		const cached = await env.STATE.get(CATEGORY_CACHE_KEY, 'json');
+		if (!Array.isArray(cached) || cached.includes(category)) return;
+		cached.push(category);
+		await env.STATE.put(CATEGORY_CACHE_KEY, JSON.stringify(cached), { expirationTtl: CATEGORY_CACHE_TTL });
+	} catch (e) {
+		console.error('[category cache update]', e);
+	}
+}
+
+// Category getter for the 3s-limited modal responses. Uses the cache if warm;
+// on a cold cache it waits only a short budget for the fetch (so the dropdown
+// still appears when the instance responds quickly), otherwise falls back to []
+// while the fetch finishes in the background and warms the cache for next time.
+async function getCategoriesForModal(env, ctx) {
+	const cached = await env.STATE.get(CATEGORY_CACHE_KEY, 'json');
+	if (cached) return cached;
+	const fetchP = refreshCategoryCache(env);
+	ctx.waitUntil(fetchP);
+	const timeout = new Promise(resolve => setTimeout(() => resolve(null), CATEGORY_MODAL_FETCH_BUDGET_MS));
+	const result = await Promise.race([fetchP, timeout]);
+	return Array.isArray(result) ? result : [];
 }
 
 export async function handleSlashCommand(interaction, env, ctx) {
@@ -121,7 +163,7 @@ async function handleAddCommand(interaction, env, ctx, sub) {
 		channelId: interaction.channel_id,
 	}, ADD_SESSION_TTL);
 
-	const categories = await getCachedCategories(env);
+	const categories = await getCategoriesForModal(env, ctx);
 	return modalResponse(buildAddModal(addKey, categories));
 }
 
@@ -395,7 +437,7 @@ export async function handleButton(interaction, env, ctx) {
 		if (!isSubmitter && !isApprover) {
 			return ephemeralReply('🔒 編集権限がありません (申請者または承認者のみ)');
 		}
-		const categories = await getCachedCategories(env);
+		const categories = await getCategoriesForModal(env, ctx);
 		return modalResponse(buildEditModal(key, current.meta, categories));
 	}
 
@@ -529,6 +571,7 @@ async function handleApproveBackground(env, interaction, key, current, approverT
 			console.error('[patch approved message]', e);
 		}
 		console.log(`[approved] ${current.attachment.name} -> :${result.name}: (id=${result.id}) by ${approverTag}`);
+		await addCategoryToCache(env, current.meta.category ?? defaults.category);
 		await patchSubmitterReceipt(env, key, updated);
 		await deleteR2Image(env, current.attachment?.r2Key);
 		await notifySubmitter(env, updated, 'approved', approverTag, result.name);
