@@ -57,7 +57,9 @@ function modalResponse(modal) {
 }
 
 const CATEGORY_CACHE_KEY = 'cache:categories';
-const CATEGORY_CACHE_TTL = 60 * 60;
+// Categories rarely change, so cache for a long time and keep it fresh by
+// appending on approval (see addCategoryToCache) rather than re-scanning.
+const CATEGORY_CACHE_TTL = 30 * 24 * 60 * 60;
 
 function ephemeralReply(content) {
 	return {
@@ -95,6 +97,22 @@ async function getCachedCategories(env) {
 	const cached = await env.STATE.get(CATEGORY_CACHE_KEY, 'json');
 	if (cached) return cached;
 	return refreshCategoryCache(env);
+}
+
+// Keep the long-lived category cache current by folding in the category of a
+// just-approved emoji, so new categories show up without a full re-scan. If no
+// cache exists yet we skip it — the next cold read rebuilds the full list
+// (seeding with a single category would hide every other one for 30 days).
+async function addCategoryToCache(env, category) {
+	if (!category) return;
+	try {
+		const cached = await env.STATE.get(CATEGORY_CACHE_KEY, 'json');
+		if (!Array.isArray(cached) || cached.includes(category)) return;
+		cached.push(category);
+		await env.STATE.put(CATEGORY_CACHE_KEY, JSON.stringify(cached), { expirationTtl: CATEGORY_CACHE_TTL });
+	} catch (e) {
+		console.error('[category cache update]', e);
+	}
 }
 
 // Category getter for the 3s-limited modal responses. Uses the cache if warm;
@@ -553,6 +571,7 @@ async function handleApproveBackground(env, interaction, key, current, approverT
 			console.error('[patch approved message]', e);
 		}
 		console.log(`[approved] ${current.attachment.name} -> :${result.name}: (id=${result.id}) by ${approverTag}`);
+		await addCategoryToCache(env, current.meta.category ?? defaults.category);
 		await patchSubmitterReceipt(env, key, updated);
 		await deleteR2Image(env, current.attachment?.r2Key);
 		await notifySubmitter(env, updated, 'approved', approverTag, result.name);
