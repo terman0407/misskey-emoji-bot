@@ -1,5 +1,5 @@
 import { sanitizeEmojiName, isValidEmojiName } from '../sanitize.js';
-import { ALLOWED_TYPES, downloadAttachment, uploadBufferToDrive, registerEmojiByFileId, cleanupDriveFile } from '../register.js';
+import { ALLOWED_TYPES, normalizeContentType, downloadAttachment, uploadBufferToDrive, registerEmojiByFileId, cleanupDriveFile } from '../register.js';
 import { fetchAllCategories } from '../misskey.js';
 import * as state from './state.js';
 import {
@@ -147,7 +147,11 @@ async function handleAddCommand(interaction, env, ctx, sub) {
 	const attachment = interaction.data.resolved?.attachments?.[attachmentId];
 	if (!attachment) return ephemeralReply('❌ 添付ファイルが取得できませんでした。');
 
-	if (!ALLOWED_TYPES.has(attachment.content_type ?? '')) {
+	// Discord may report a non-canonical MIME (e.g. image/vnd.mozilla.apng for
+	// APNG), so normalize before the allow-list check and store the canonical
+	// type — that's what gets sent on to R2 and the Misskey drive.
+	const contentType = normalizeContentType(attachment.content_type);
+	if (!ALLOWED_TYPES.has(contentType)) {
 		return ephemeralReply(`❌ 対応していない画像タイプです: \`${attachment.content_type ?? 'unknown'}\``);
 	}
 
@@ -155,7 +159,7 @@ async function handleAddCommand(interaction, env, ctx, sub) {
 	await state.put(env.STATE, `add-session:${addKey}`, {
 		attachment: {
 			name: attachment.filename,
-			contentType: attachment.content_type,
+			contentType,
 			url: attachment.url,
 		},
 		submitterId: interaction.member?.user?.id ?? interaction.user?.id,

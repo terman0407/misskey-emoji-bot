@@ -9,6 +9,22 @@ export const ALLOWED_TYPES = new Set([
 	'image/jpeg',
 ]);
 
+// Discord reports APNG uploads with the legacy Mozilla MIME type, and some
+// clients send JPEG as image/jpg. Map those onto the canonical types so the
+// allow-list check passes and Misskey receives a type it recognises.
+const CONTENT_TYPE_ALIASES = {
+	'image/vnd.mozilla.apng': 'image/apng',
+	'image/x-apng': 'image/apng',
+	'image/jpg': 'image/jpeg',
+	'image/pjpeg': 'image/jpeg',
+};
+
+export function normalizeContentType(contentType) {
+	// Strip any parameters (e.g. "image/png; charset=binary") and normalize case.
+	const base = String(contentType ?? '').split(';')[0].trim().toLowerCase();
+	return CONTENT_TYPE_ALIASES[base] ?? base;
+}
+
 const FRIENDLY_BY_CODE = {
 	DUPLICATE_NAME: '同じ名前のカスタム絵文字が既に登録されています。別の名前に変更してください。',
 	UNSUPPORTED_FILE_TYPE: 'Misskey が対応していない画像形式です。',
@@ -44,7 +60,7 @@ export async function downloadAndUploadToDrive({ attachment, config }) {
 }
 
 export async function downloadAttachment(attachment) {
-	if (!ALLOWED_TYPES.has(attachment.contentType ?? '')) {
+	if (!ALLOWED_TYPES.has(normalizeContentType(attachment.contentType))) {
 		return {
 			ok: false,
 			error: `対応していない画像形式です: \`${attachment.contentType ?? 'unknown'}\` (PNG/GIF/WEBP/APNG/JPEG のみ対応)`,
