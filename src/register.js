@@ -9,6 +9,23 @@ export const ALLOWED_TYPES = new Set([
 	'image/jpeg',
 ]);
 
+// Archives are accepted so an image can be smuggled past Discord's image
+// transform (which flattens APNG) by zipping it; the contents are validated by
+// magic bytes after extraction. octet-stream is included because clients fall
+// back to it for extensions they don't recognise — the byte check is what
+// actually decides, so a generic type is safe to let through to the download.
+export const CONTAINER_TYPES = new Set([
+	'application/zip',
+	'application/x-zip-compressed',
+	'application/zip-compressed',
+	'application/octet-stream',
+]);
+
+export function isAcceptedUploadType(contentType) {
+	const t = normalizeContentType(contentType);
+	return ALLOWED_TYPES.has(t) || CONTAINER_TYPES.has(t);
+}
+
 // Discord reports APNG uploads with the legacy Mozilla MIME type, and some
 // clients send JPEG as image/jpg. Map those onto the canonical types so the
 // allow-list check passes and Misskey receives a type it recognises.
@@ -109,10 +126,10 @@ export async function downloadAndUploadToDrive({ attachment, config }) {
 }
 
 export async function downloadAttachment(attachment) {
-	if (!ALLOWED_TYPES.has(normalizeContentType(attachment.contentType))) {
+	if (!isAcceptedUploadType(attachment.contentType)) {
 		return {
 			ok: false,
-			error: `対応していない画像形式です: \`${attachment.contentType ?? 'unknown'}\` (PNG/GIF/WEBP/APNG/JPEG のみ対応)`,
+			error: `対応していない形式です: \`${attachment.contentType ?? 'unknown'}\` (PNG/GIF/WEBP/APNG/JPEG、または ZIP)`,
 		};
 	}
 	const dlRes = await fetch(attachment.url).catch(e => ({ ok: false, status: 0, _err: e }));

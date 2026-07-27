@@ -7,6 +7,7 @@ Discord から **Misskey カスタム絵文字** を承認制で登録できる 
 ## 主な機能
 
 - **`/emoji add image:<画像>`** → モーダルで **名前 / カテゴリ / タグ / ライセンス / オプション (sensitive・localonly)** を入力して申請
+- **ZIP 添付に対応** — Discord は APNG を静止画に変換してしまうため、ZIP に圧縮して添付すると原本のまま登録できる (Bot 側で展開・マジックバイト検証)
 - **カテゴリはドロップダウン選択** — Misskey 上の既存カテゴリを**使用頻度順の上位25件**から選択 (Discord の select は最大25件・検索不可のため)。一覧に無い新規カテゴリで登録したい場合は、登録後に `/emoji edit` で変更
 - **テキストはモーダル入力なので原文を保持** — ライセンス等に `@user@host` を書いても、Discord のメンション自動変換で `@user` 部分が `<@id>` に化ける問題を回避
 - **sensitive / localonly はチェックボックス** (Checkbox Group)
@@ -166,13 +167,21 @@ npm run tail
 /emoji add image:<画像>
 ```
 
-`image` (必須・PNG / GIF / WEBP / APNG / JPEG) を指定して送信すると**モーダル**が開き、以下を入力します:
+`image` (必須・PNG / GIF / WEBP / APNG / JPEG、または **ZIP**) を指定して送信すると**モーダル**が開き、以下を入力します:
 
 - **絵文字名** (任意) — **小文字英数字とアンダーバーのみ** (`a-z 0-9 _`)。大文字は使用不可で、入力されても自動で小文字化されます。省略時は画像ファイル名からサニタイズして自動生成
 - **カテゴリ** — 既存カテゴリ (**使用頻度順 上位25件**) からドロップダウンで選択。カテゴリが 1 件も無い場合のみ手入力欄になる。一覧に無い新規カテゴリで登録したい場合は、登録後に `/emoji edit` で変更
 - **タグ** (任意・カンマ区切り)
 - **ライセンス** (任意) — 入力した内容がそのまま保持される (メンション化けなし)
 - **オプション** — センシティブ / ローカル限定 のチェックボックス (任意)
+
+> ### ⚠️ APNG は ZIP に圧縮して添付してください
+>
+> **Discord は添付された APNG を静止画 PNG に変換します。** CDN が返すバイト列の時点でアニメーションチャンク (`acTL`/`fcTL`/`fdAT`) が失われており (レスポンスに `x-discord-transform-duration` ヘッダが付く)、Bot がどう処理しても復元できません。
+>
+> **ZIP はこの変換対象外**なので、APNG を ZIP に圧縮して添付すれば原本のまま登録できます。Bot は ZIP を展開し、中身をマジックバイトで判定して登録します (deflate / 無圧縮の両対応、`__MACOSX` などは自動でスキップ)。
+>
+> APNG をそのまま添付した場合は、静止画として登録される前に**警告して中止**し、ZIP を案内します。GIF / アニメーション WebP は Discord が変換しないのでそのまま添付できます。
 
 → 承認チャンネル (or 同チャンネル) に Embed + 承認/却下/編集ボタン付きで投稿される。
 申請者には **ephemeral で受付メッセージ + 自分の申請内容の Embed (画像プレビュー付き) + ✏️ 編集ボタン** が表示される (本人のみ可視)。
@@ -218,7 +227,7 @@ npm run tail
 | `npm run dev` | ローカルで Workers を起動 (`.dev.vars` から secrets 読み込み) |
 | `npm run deploy` | Cloudflare に Workers をデプロイ |
 | `npm run tail` | デプロイ済み Workers のログをライブ表示 |
-| `npm test` | sanitize 関数 + discord ヘルパ (メンション復元 / カテゴリ option / モーダル読み取り) のテスト |
+| `npm test` | sanitize / discord ヘルパ / 画像形式判定 (APNG 検出) / ZIP 展開 のテスト |
 | `node scripts/list-commands.js` | 登録済みのスラッシュコマンドを表示 |
 
 ## ディレクトリ構成
@@ -228,7 +237,8 @@ src/
 ├── sanitize.js        # 絵文字名サニタイズ
 ├── sanitize.test.js   # サニタイズ関数のテスト
 ├── misskey.js         # Misskey API ラッパ (drive/files/create, admin/emoji/{add,list,delete}, drive/files/delete)
-├── register.js        # Misskey 登録ロジック + エラー翻訳
+├── register.js        # Misskey 登録ロジック + エラー翻訳 + 画像形式判定 (マジックバイト/APNG 検出)
+├── zip.js             # 最小 ZIP リーダ (Discord の画像変換を回避するための展開)
 ├── commands/
 │   └── emoji.js       # /emoji {add,edit} の SlashCommandBuilder 定義 (register で使用)
 └── worker/            # Cloudflare Workers 実装
