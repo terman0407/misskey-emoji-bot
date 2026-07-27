@@ -25,6 +25,55 @@ export function normalizeContentType(contentType) {
 	return CONTENT_TYPE_ALIASES[base] ?? base;
 }
 
+const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+// An animated PNG is a plain PNG carrying an `acTL` (animation control) chunk
+// before the first `IDAT`. Extension and MIME can't distinguish it — a .png
+// file uploaded from Discord arrives as image/png either way — so walk the
+// chunk list and look for it.
+export function isApng(data) {
+	const b = new Uint8Array(data);
+	if (b.length < PNG_SIGNATURE.length) return false;
+	for (let i = 0; i < PNG_SIGNATURE.length; i++) {
+		if (b[i] !== PNG_SIGNATURE[i]) return false;
+	}
+	// Each chunk is: length (4B, big-endian) + type (4B) + data + CRC (4B).
+	let off = PNG_SIGNATURE.length;
+	while (off + 8 <= b.length) {
+		const len = ((b[off] << 24) | (b[off + 1] << 16) | (b[off + 2] << 8) | b[off + 3]) >>> 0;
+		const type = String.fromCharCode(b[off + 4], b[off + 5], b[off + 6], b[off + 7]);
+		if (type === 'acTL') return true;
+		// acTL must precede IDAT; once pixel data starts it's a static PNG.
+		if (type === 'IDAT') return false;
+		off += 12 + len;
+	}
+	return false;
+}
+
+// Identify the real format from magic bytes. Used after download so a
+// mislabelled attachment (wrong or generic MIME from the client) is judged on
+// content rather than on what Discord claimed. Returns null if the bytes are
+// not one of the formats we support.
+export function sniffImageType(data) {
+	const b = new Uint8Array(data);
+	const startsWith = bytes => bytes.every((v, i) => b[i] === v);
+
+	if (startsWith(PNG_SIGNATURE)) return isApng(data) ? 'image/apng' : 'image/png';
+	if (startsWith([0x47, 0x49, 0x46, 0x38])) return 'image/gif';
+	if (startsWith([0xff, 0xd8, 0xff])) return 'image/jpeg';
+	// WEBP: "RIFF" .... "WEBP"
+	if (startsWith([0x52, 0x49, 0x46, 0x46])
+		&& b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'image/webp';
+	return null;
+}
+
+// APNG is conventionally served as image/png on the web, so label the public R2
+// object that way to keep the approval-embed preview rendering everywhere.
+// Misskey re-detects the animation from the bytes, so nothing is lost.
+export function publicContentType(contentType) {
+	return contentType === 'image/apng' ? 'image/png' : contentType;
+}
+
 const FRIENDLY_BY_CODE = {
 	DUPLICATE_NAME: '同じ名前のカスタム絵文字が既に登録されています。別の名前に変更してください。',
 	UNSUPPORTED_FILE_TYPE: 'Misskey が対応していない画像形式です。',

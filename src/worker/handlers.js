@@ -1,5 +1,5 @@
 import { sanitizeEmojiName, isValidEmojiName } from '../sanitize.js';
-import { ALLOWED_TYPES, normalizeContentType, downloadAttachment, uploadBufferToDrive, registerEmojiByFileId, cleanupDriveFile } from '../register.js';
+import { ALLOWED_TYPES, normalizeContentType, sniffImageType, publicContentType, downloadAttachment, uploadBufferToDrive, registerEmojiByFileId, cleanupDriveFile } from '../register.js';
 import { fetchAllCategories } from '../misskey.js';
 import * as state from './state.js';
 import {
@@ -212,11 +212,23 @@ export async function handleAddModalSubmit(interaction, env, ctx, addKey) {
 		return ephemeralReply(`❌ 画像の保存に失敗しました: ${dl.error}`);
 	}
 
+	// Now that the bytes are in hand, judge the format on content rather than on
+	// what Discord claimed. A .png file holding an animation arrives as
+	// image/png, so this is what distinguishes APNG from a static PNG.
+	const sniffed = sniffImageType(dl.data);
+	if (!sniffed) {
+		return ephemeralReply('❌ 画像として認識できませんでした (PNG/GIF/WEBP/APNG/JPEG のみ対応)。');
+	}
+	const contentType = sniffed;
+	if (contentType !== session.attachment.contentType) {
+		console.log(`[content-type] ${session.attachment.name}: declared=${session.attachment.contentType} detected=${contentType}`);
+	}
+
 	const approvalKey = state.newKey();
 	const r2Key = `${env.R2_KEY_PREFIX}${approvalKey}`;
 	try {
 		await env.EMOJI_BUCKET.put(r2Key, dl.data, {
-			httpMetadata: { contentType: session.attachment.contentType },
+			httpMetadata: { contentType: publicContentType(contentType) },
 		});
 	} catch (e) {
 		console.error('[r2 put]', e);
@@ -233,7 +245,7 @@ export async function handleAddModalSubmit(interaction, env, ctx, addKey) {
 		channelId: session.channelId,
 		attachment: {
 			name: session.attachment.name,
-			contentType: session.attachment.contentType,
+			contentType,
 			r2Key,
 			url: publicUrl,
 		},
