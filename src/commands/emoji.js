@@ -9,7 +9,7 @@ export const data = new SlashCommandBuilder()
 		.setDescription('画像を Misskey にカスタム絵文字として登録 (承認制)')
 		.addAttachmentOption(o => o
 			.setName('image')
-			.setDescription('絵文字にする画像 (PNG/GIF/WEBP/APNG/JPEG)')
+			.setDescription('画像 (PNG/GIF/WEBP/APNG/JPEG)。APNG は ZIP に圧縮して添付してください')
 			.setRequired(true)))
 	.addSubcommand(sub => sub
 		.setName('edit')

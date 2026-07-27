@@ -1,5 +1,6 @@
 import { sanitizeEmojiName, isValidEmojiName } from '../sanitize.js';
-import { ALLOWED_TYPES, normalizeContentType, sniffImageType, publicContentType, downloadAttachment, uploadBufferToDrive, registerEmojiByFileId, cleanupDriveFile } from '../register.js';
+import { isAcceptedUploadType, normalizeContentType, sniffImageType, publicContentType, downloadAttachment, uploadBufferToDrive, registerEmojiByFileId, cleanupDriveFile } from '../register.js';
+import { isZip, extractImageFromZip } from '../zip.js';
 import { fetchAllCategories } from '../misskey.js';
 import * as state from './state.js';
 import {
@@ -51,6 +52,26 @@ async function patchSubmitterReceipt(env, approvalKey, current) {
 }
 
 const ADD_SESSION_TTL = 15 * 60;
+
+// Discord re-encodes image attachments, and that pass drops the APNG animation
+// chunks (acTL/fcTL/fdAT) — the CDN serves back a flattened static PNG, so the
+// animation is already gone before the bot ever sees the file. Archives aren't
+// touched, so zipping the image is the way through.
+const APNG_FLATTENED_NOTICE = [
+	'⚠️ **APNG のアニメーションが Discord によって除去されました。**',
+	'Discord は添付された APNG を静止画 PNG に変換してしまうため、そのままでは動かない絵文字になります。',
+	'',
+	'**対処:** 画像を **ZIP に圧縮して添付**し、もう一度 `/emoji add` を実行してください。ZIP なら Discord が中身を変換しないので、原本のまま登録できます。',
+	'(GIF / アニメーション WebP はそのまま添付しても動作します)',
+].join('\n');
+
+// True when the submitter clearly intended an APNG: Discord derives the content
+// type from the extension, so an `.apng` upload is declared as APNG even after
+// the bytes have been flattened.
+function looksLikeApngUpload(attachment, sourceName) {
+	return normalizeContentType(attachment?.contentType) === 'image/apng'
+		|| /\.apng$/i.test(sourceName ?? '');
+}
 
 function modalResponse(modal) {
 	return { type: InteractionResponseType.MODAL, data: modal };
@@ -147,13 +168,12 @@ async function handleAddCommand(interaction, env, ctx, sub) {
 	const attachment = interaction.data.resolved?.attachments?.[attachmentId];
 	if (!attachment) return ephemeralReply('❌ 添付ファイルが取得できませんでした。');
 
-	// Discord may report a non-canonical MIME (e.g. image/vnd.mozilla.apng for
-	// APNG), so normalize before the allow-list check and store the canonical
-	// type — that's what gets sent on to R2 and the Misskey drive.
-	const contentType = normalizeContentType(attachment.content_type);
-	if (!ALLOWED_TYPES.has(contentType)) {
-		return ephemeralReply(`❌ 対応していない画像タイプです: \`${attachment.content_type ?? 'unknown'}\``);
+	// Only a coarse check here — the real decision is made on the bytes after
+	// download (see handleAddModalSubmit), which also covers ZIP-wrapped images.
+	if (!isAcceptedUploadType(attachment.content_type)) {
+		return ephemeralReply(`❌ 対応していない形式です: \`${attachment.content_type ?? 'unknown'}\`\nPNG/GIF/WEBP/APNG/JPEG、または ZIP で添付してください。`);
 	}
+	const contentType = normalizeContentType(attachment.content_type);
 
 	const addKey = state.newKey();
 	await state.put(env.STATE, `add-session:${addKey}`, {
@@ -177,28 +197,12 @@ export async function handleAddModalSubmit(interaction, env, ctx, addKey) {
 		return ephemeralReply('⏱ 入力セッションが期限切れです。もう一度 `/emoji add` からやり直してください。');
 	}
 
-	let name = readModalField(interaction, 'name');
-	if (!name) name = sanitizeEmojiName(session.attachment.name);
-	else if (!isValidEmojiName(name)) name = sanitizeEmojiName(name);
-	if (!isValidEmojiName(name)) {
-		return ephemeralReply('❌ 絵文字名を決められませんでした。a-z 0-9 _ のみ使用可能です。');
-	}
-
 	const category = (readModalField(interaction, 'category_new') || readModalSelect(interaction, 'category_select')).trim();
 	if (!category) return ephemeralReply('❌ カテゴリは必須です。一覧から選ぶか「新規カテゴリ」に入力してください。');
 
 	const tags = readModalField(interaction, 'tags');
 	const license = readModalField(interaction, 'license');
 	const flags = readModalValues(interaction, 'options');
-
-	const meta = {
-		name,
-		category,
-		aliases: tags ? tags.split(/[,、]/).map(s => s.trim()).filter(Boolean) : [],
-		license: license || undefined,
-		isSensitive: flags.includes(FLAG_SENSITIVE),
-		localOnly: flags.includes(FLAG_LOCALONLY),
-	};
 
 	// Download from Discord and store the image in R2 (instead of pushing to
 	// Misskey drive immediately). This way the submitter can cancel before
@@ -212,22 +216,58 @@ export async function handleAddModalSubmit(interaction, env, ctx, addKey) {
 		return ephemeralReply(`❌ 画像の保存に失敗しました: ${dl.error}`);
 	}
 
-	// Now that the bytes are in hand, judge the format on content rather than on
-	// what Discord claimed. A .png file holding an animation arrives as
-	// image/png, so this is what distinguishes APNG from a static PNG.
-	const sniffed = sniffImageType(dl.data);
-	if (!sniffed) {
-		return ephemeralReply('❌ 画像として認識できませんでした (PNG/GIF/WEBP/APNG/JPEG のみ対応)。');
+	// Judge the format on the bytes, not on what Discord claimed: a .png holding
+	// an animation arrives as image/png, and a ZIP has to be opened first. Discord
+	// rewrites image attachments (it flattens APNG), so wrapping the file in a
+	// .zip is the way to get the original bytes through untouched.
+	let data = dl.data;
+	let sourceName = session.attachment.name;
+	let contentType;
+	if (isZip(data)) {
+		const extracted = await extractImageFromZip(data, sniffImageType);
+		if (!extracted.ok) return ephemeralReply(`❌ ${extracted.error}`);
+		data = extracted.data;
+		sourceName = extracted.name;
+		contentType = extracted.contentType;
+		console.log(`[zip] ${session.attachment.name} -> ${sourceName} (${contentType}, ${data.byteLength}B)`);
+	} else {
+		contentType = sniffImageType(data);
+		if (!contentType) {
+			return ephemeralReply('❌ 画像として認識できませんでした (PNG/GIF/WEBP/APNG/JPEG、または ZIP)。');
+		}
+		if (contentType !== session.attachment.contentType) {
+			console.log(`[content-type] ${sourceName}: declared=${session.attachment.contentType} detected=${contentType}`);
+		}
+		// The submitter meant to upload an animation but Discord's image transform
+		// stripped it on the way in. Registering the flattened result would be
+		// silently wrong, so stop and explain the ZIP workaround.
+		if (contentType === 'image/png' && looksLikeApngUpload(session.attachment, sourceName)) {
+			return ephemeralReply(APNG_FLATTENED_NOTICE);
+		}
 	}
-	const contentType = sniffed;
-	if (contentType !== session.attachment.contentType) {
-		console.log(`[content-type] ${session.attachment.name}: declared=${session.attachment.contentType} detected=${contentType}`);
+
+	// Resolve the emoji name only now, so the fallback can use the filename from
+	// inside the ZIP rather than the archive's own name.
+	let name = readModalField(interaction, 'name');
+	if (!name) name = sanitizeEmojiName(sourceName);
+	else if (!isValidEmojiName(name)) name = sanitizeEmojiName(name);
+	if (!isValidEmojiName(name)) {
+		return ephemeralReply('❌ 絵文字名を決められませんでした。a-z 0-9 _ のみ使用可能です。');
 	}
+
+	const meta = {
+		name,
+		category,
+		aliases: tags ? tags.split(/[,、]/).map(s => s.trim()).filter(Boolean) : [],
+		license: license || undefined,
+		isSensitive: flags.includes(FLAG_SENSITIVE),
+		localOnly: flags.includes(FLAG_LOCALONLY),
+	};
 
 	const approvalKey = state.newKey();
 	const r2Key = `${env.R2_KEY_PREFIX}${approvalKey}`;
 	try {
-		await env.EMOJI_BUCKET.put(r2Key, dl.data, {
+		await env.EMOJI_BUCKET.put(r2Key, data, {
 			httpMetadata: { contentType: publicContentType(contentType) },
 		});
 	} catch (e) {
@@ -244,7 +284,7 @@ export async function handleAddModalSubmit(interaction, env, ctx, addKey) {
 		submitterTag: session.submitterTag,
 		channelId: session.channelId,
 		attachment: {
-			name: session.attachment.name,
+			name: sourceName,
 			contentType,
 			r2Key,
 			url: publicUrl,
